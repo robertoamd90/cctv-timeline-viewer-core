@@ -1,0 +1,27 @@
+name: Verify Catalog Link
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure catalog deploy key
+        env:
+          CATALOG_DEPLOY_KEY: ${{ secrets.CATALOG_DEPLOY_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CATALOG_DEPLOY_KEY" > ~/.ssh/catalog
+          chmod 600 ~/.ssh/catalog
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Verify catalog write access
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/catalog -o IdentitiesOnly=yes
+        run: |
+          git clone git@github.com:robertoamd90/cctv-timeline-viewer.git catalog
+          git -C catalog push --dry-run origin HEAD:main

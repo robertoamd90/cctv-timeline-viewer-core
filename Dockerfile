@@ -5,7 +5,7 @@ ARG BUILD_VERSION=dev
 LABEL org.opencontainers.image.title="CCTV Viewer" \
       org.opencontainers.image.description="Timeline viewer for CCTV recordings" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
-      org.opencontainers.image.source="https://github.com/robertoamd90/cctv-timeline-viewer"
+      org.opencontainers.image.source="https://github.com/robertoamd90/cctv-timeline-viewer-core"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \

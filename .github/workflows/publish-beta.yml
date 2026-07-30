@@ -1,0 +1,77 @@
+name: Publish Beta
+
+on:
+  push:
+    tags:
+      - "v*.*.*-beta.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-beta
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
+
+  request:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release metadata
+        id: release
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base_version="${version%%-beta.*}"
+          python scripts/create_release_request.py \
+            beta "$version" "$GITHUB_SHA" "$GITHUB_REF_NAME" /tmp/beta.json
+          grep -q "^## ${base_version}$" CHANGELOG.md ||
+            grep -q "^## ${version}$" CHANGELOG.md
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Configure catalog deploy key
+        env:
+          CATALOG_DEPLOY_KEY: ${{ secrets.CATALOG_DEPLOY_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CATALOG_DEPLOY_KEY" > ~/.ssh/catalog
+          chmod 600 ~/.ssh/catalog
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Request catalog publication
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/catalog -o IdentitiesOnly=yes
+        run: |
+          git clone git@github.com:robertoamd90/cctv-timeline-viewer.git /tmp/catalog
+          mkdir -p /tmp/catalog/.release-requests
+          cp /tmp/beta.json /tmp/catalog/.release-requests/beta.json
+          git -C /tmp/catalog config user.name "cctv-release[bot]"
+          git -C /tmp/catalog config user.email "cctv-release@users.noreply.github.com"
+          git -C /tmp/catalog add .release-requests/beta.json
+          git -C /tmp/catalog commit -m \
+            "Request CCTV Viewer Beta ${{ steps.release.outputs.version }}"
+          git -C /tmp/catalog push origin main
+
+      - name: Wait for catalog publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/wait_for_catalog.py beta
+          "${{ steps.release.outputs.version }}"
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" \
+              --prerelease \
+              --title "CCTV Viewer ${{ steps.release.outputs.version }}" \
+              --generate-notes

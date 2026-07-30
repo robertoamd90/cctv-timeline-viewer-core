@@ -1,0 +1,97 @@
+name: Promote Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: "Published beta tag, for example v0.2.0-beta.3"
+        required: true
+        type: string
+      version:
+        description: "Stable version, for example 0.2.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-stable
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.candidate }}
+
+      - name: Validate candidate
+        id: release
+        shell: bash
+        run: |
+          candidate="${{ inputs.candidate }}"
+          candidate_version="${candidate#v}"
+          version="${{ inputs.version }}"
+          case "$candidate_version" in
+            "${version}-beta."*) ;;
+            *)
+              echo "Candidate $candidate does not belong to stable $version" >&2
+              exit 1
+              ;;
+          esac
+          source_sha="$(git rev-parse HEAD)"
+          python scripts/create_release_request.py \
+            stable "$version" "$source_sha" "$candidate" /tmp/stable.json \
+            --candidate "$candidate_version"
+          grep -q "^## ${version}$" CHANGELOG.md
+          echo "candidate_version=$candidate_version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure catalog deploy key
+        env:
+          CATALOG_DEPLOY_KEY: ${{ secrets.CATALOG_DEPLOY_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CATALOG_DEPLOY_KEY" > ~/.ssh/catalog
+          chmod 600 ~/.ssh/catalog
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+
+      - name: Request catalog promotion
+        env:
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/catalog -o IdentitiesOnly=yes
+        run: |
+          git clone git@github.com:robertoamd90/cctv-timeline-viewer.git /tmp/catalog
+          mkdir -p /tmp/catalog/.release-requests
+          cp /tmp/stable.json /tmp/catalog/.release-requests/stable.json
+          git -C /tmp/catalog config user.name "cctv-release[bot]"
+          git -C /tmp/catalog config user.email "cctv-release@users.noreply.github.com"
+          git -C /tmp/catalog add .release-requests/stable.json
+          git -C /tmp/catalog commit -m \
+            "Request CCTV Viewer ${{ inputs.version }}"
+          git -C /tmp/catalog push origin main
+
+      - name: Wait for catalog publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/wait_for_catalog.py stable "${{ inputs.version }}"
+
+      - name: Create stable tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          source_sha="${{ steps.release.outputs.source_sha }}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "$tag")" = "$source_sha"
+          else
+            git tag -a "$tag" "$source_sha" -m "CCTV Viewer ${{ inputs.version }}"
+            git push origin "$tag"
+          fi
+          gh release view "$tag" >/dev/null 2>&1 ||
+            gh release create "$tag" \
+              --title "CCTV Viewer ${{ inputs.version }}" \
+              --generate-notes

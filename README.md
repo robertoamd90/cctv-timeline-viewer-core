@@ -19,7 +19,7 @@ already available as files on the local filesystem.
 Home Assistant OS and Supervised are the primary supported deployments.
 
 1. Open **Settings > Apps > App store > Repositories**.
-2. Add this repository:
+2. Add the Home Assistant catalog repository:
 
    ```text
    https://github.com/robertoamd90/cctv-timeline-viewer
@@ -28,9 +28,9 @@ Home Assistant OS and Supervised are the primary supported deployments.
 3. Install **CCTV Viewer**, start it, and enable **Show in sidebar**.
 4. Configure each camera from the app using a source directory under `/media`.
 
-The repository also exposes **CCTV Viewer Beta** for testing the upcoming
-release line. It uses separate app data and the `cctv-viewer-beta` container
-image, so it can be installed alongside the stable app without changing it.
+The catalog also exposes **CCTV Viewer Beta** for testing the upcoming release
+line. It uses separate app data and the `cctv-viewer-beta` container image, so
+it can be installed alongside the stable app without changing it.
 
 The add-on mounts Home Assistant Media read-only. Configure SMB/NFS storage in
 Home Assistant first; CCTV Viewer does not mount network shares or store their
@@ -49,8 +49,8 @@ from backups because they can be rebuilt.
 - `ffmpeg` and `ffprobe`
 
 ```bash
-git clone https://github.com/robertoamd90/cctv-timeline-viewer.git
-cd cctv-timeline-viewer
+git clone https://github.com/robertoamd90/cctv-timeline-viewer-core.git
+cd cctv-timeline-viewer-core
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -131,26 +131,44 @@ depends on the actual codec; H.264 video in MP4 or MOV is recommended.
 ## Repository Layout
 
 ```text
-ctv_server/    FastAPI backend and SQLite index
-ctv_web/       Vanilla JavaScript frontend
-cctv_viewer/   Public Home Assistant add-on manifest and documentation
-cctv_viewer_beta/ Beta Home Assistant add-on manifest and documentation
-scripts/       Development tools
+ctv_server/                 FastAPI backend and SQLite index
+ctv_web/                    Vanilla JavaScript frontend
+packaging/homeassistant/    Templates for local Supervisor builds
+scripts/                    Development and release tools
+tests/                      Backend and browser-independent frontend tests
 ```
 
-There is one application source tree: `ctv_server/` and `ctv_web/`.
-`cctv_viewer/config.yaml` is the public Home Assistant add-on manifest, while
-the root `repository.yaml` describes the add-on repository itself. GitHub
-Actions builds the published multi-architecture image from the root Dockerfile.
-The `main` branch is the stable line. The persistent `pre-release` branch is
-the beta line; pushes to it publish the beta image. A promotion is done by
-opening a pull request from `pre-release` to `main`, then creating a stable
-`vX.Y.Z` tag on the merged commit.
+This repository contains the application source and produces immutable release
+requests. The separate
+[`cctv-timeline-viewer`](https://github.com/robertoamd90/cctv-timeline-viewer)
+repository is the Home Assistant catalog and contains only public manifests,
+documentation and release state. Home Assistant keeps using that original URL.
 
-After the multi-architecture Beta image has been published successfully, the
-pre-release workflow copies only the Beta manifest, changelog and documentation
-to `main`. Home Assistant therefore discovers the update only when its matching
-image is ready; application source remains isolated on `pre-release`.
+`main` is the only long-lived source branch. Beta and stable are distribution
+channels represented by immutable tags, not by branches. A beta tag such as
+`v0.2.0-beta.1` requests a multi-architecture Beta image from the catalog.
+Stable promotion copies the already tested Beta image to its stable version;
+it does not rebuild application code.
+
+To publish a beta after updating the target version section in `CHANGELOG.md`:
+
+```bash
+git tag -a v0.2.0-beta.1 -m "CCTV Viewer 0.2.0 Beta 1"
+git push origin v0.2.0-beta.1
+```
+
+After validating that candidate, promote the exact artifact:
+
+```bash
+gh workflow run promote-stable.yml \
+  -f candidate=v0.2.0-beta.1 \
+  -f version=0.2.0
+```
+
+The source workflow writes a release request to the catalog. The catalog owns
+GHCR publication, verifies both supported architectures and updates the Home
+Assistant manifest only after the image is available. Source `main` therefore
+never receives generated release commits.
 
 For a local Supervisor build without publishing an image, run this from the
 repository root:
@@ -161,6 +179,7 @@ repository root:
 
 It generates the ignored `addons/cctv_viewer/` build context. This is a
 disposable test artifact, not a second source tree; never edit it manually.
+Pass `stable` or `beta` to generate only one channel.
 
 ## Development Checks
 

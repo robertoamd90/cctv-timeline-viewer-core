@@ -168,7 +168,8 @@ gh workflow run promote-stable.yml \
 The source workflow writes a release request to the catalog. The catalog owns
 GHCR publication, verifies both supported architectures and updates the Home
 Assistant manifest only after the image is available. Source `main` therefore
-never receives generated release commits.
+never receives generated release commits. Operational details, recovery and
+rollback procedures are documented in [RELEASING.md](RELEASING.md).
 
 For a local Supervisor build without publishing an image, run this from the
 repository root:

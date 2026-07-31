@@ -358,7 +358,21 @@ function findRecordingAt(cameraId, ts) {
   if (!S.timeline || ts == null) return null;
   const cam = S.timeline.cameras.find(c => c.camera_id === cameraId);
   if (!cam) return null;
-  return cam.segments.find(s => ts >= s.start_ts && (s.end_ts == null || ts < s.end_ts)) || null;
+  const recording = cam.segments.find(
+    segment => ts >= segment.start_ts &&
+      (segment.end_ts == null || ts < segment.end_ts)
+  ) || null;
+  if (!recording || S.streamProfile === 'native' || recording.end_ts == null) {
+    return recording;
+  }
+  const plan = CtvMedia.playbackPlan(S.streamProfile, S.speed);
+  const configuredFps = Number(S.streamProfiles?.[S.streamProfile]?.fps);
+  const fallbackFps = S.streamProfile === 'balanced' ? 15 : 8;
+  return CtvMedia.transcodedTailHasFrame(
+    recording.end_ts - ts,
+    plan.streamSpeed,
+    configuredFps || fallbackFps,
+  ) ? recording : null;
 }
 
 function syncAutoHotspotAtCurrentTime() {
@@ -463,7 +477,10 @@ function bufferedAheadAt(video, current) {
 
 function requiredBuffer(video, currentTime = video.currentTime) {
   const expectedDuration = parseFloat(video.parentElement.dataset.duration);
-  return CtvMedia.requiredPlaybackBuffer(videoTimelineSpeed(video), currentTime, expectedDuration);
+  // A transcoded stream already encodes the requested timeline speed. Buffer
+  // demand depends on how quickly the browser consumes that stream, not on the
+  // amount of source time represented by each encoded second.
+  return CtvMedia.requiredPlaybackBuffer(videoPlaybackRate(video), currentTime, expectedDuration);
 }
 
 function videoReachedEnd(video) {

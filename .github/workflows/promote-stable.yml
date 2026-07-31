@@ -70,9 +70,11 @@ jobs:
           git -C /tmp/catalog config user.name "cctv-release[bot]"
           git -C /tmp/catalog config user.email "cctv-release@users.noreply.github.com"
           git -C /tmp/catalog add .release-requests/stable.json
-          git -C /tmp/catalog commit -m \
-            "Request CCTV Viewer ${{ inputs.version }}"
-          git -C /tmp/catalog push origin main
+          if ! git -C /tmp/catalog diff --cached --quiet; then
+            git -C /tmp/catalog commit -m \
+              "Request CCTV Viewer ${{ inputs.version }}"
+            git -C /tmp/catalog push origin main
+          fi
 
       - name: Wait for catalog publication
         env:

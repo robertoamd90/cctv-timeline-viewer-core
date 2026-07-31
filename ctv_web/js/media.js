@@ -41,6 +41,13 @@
     };
   }
 
+  function transcodedTailHasFrame(remainingTimeline, streamSpeed, outputFps) {
+    if (!Number.isFinite(remainingTimeline) || remainingTimeline <= 0) return false;
+    const speed = Number.isFinite(streamSpeed) && streamSpeed > 0 ? streamSpeed : 1;
+    const fps = Number.isFinite(outputFps) && outputFps > 0 ? outputFps : 1;
+    return remainingTimeline * fps / speed >= 1;
+  }
+
   function mediaTimeForTimeline(
     globalTime, recordingStart, streamOffset, streamSpeed, expectedDuration,
   ) {
@@ -68,6 +75,7 @@
     requiredPlaybackBuffer,
     timelinePlaybackSpeed,
     playbackPlan,
+    transcodedTailHasFrame,
     mediaTimeForTimeline,
     timelineTimeForMedia,
     medianTime,

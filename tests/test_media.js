@@ -6,6 +6,7 @@ const {
   requiredPlaybackBuffer,
   timelinePlaybackSpeed,
   playbackPlan,
+  transcodedTailHasFrame,
   mediaTimeForTimeline,
   timelineTimeForMedia,
   medianTime,
@@ -63,6 +64,13 @@ assert.deepEqual(playbackPlan('balanced', 16), {
 assert.deepEqual(playbackPlan('fast', 0.5), {
   transcoded: true, streamSpeed: 1, playbackRate: 0.5,
 });
+assert.equal(transcodedTailHasFrame(2.5, 16, 15), true);
+assert.equal(
+  transcodedTailHasFrame(0.2, 16, 15),
+  false,
+  'a transcoded tail too short to produce one output frame must be skipped',
+);
+assert.equal(transcodedTailHasFrame(1, 8, 8), true);
 assert.equal(mediaTimeForTimeline(130, 100, 10, 4, 20), 5);
 assert.equal(timelineTimeForMedia(5, 100, 10, 4), 130);
 
@@ -76,7 +84,8 @@ assert(playerSource.includes("canPlayType('application/vnd.apple.mpegurl')"));
 assert.match(playerSource, /navigator\.maxTouchPoints > 0/);
 assert.match(playerSource, /if \(!mobilePlayback\) return false/);
 assert(playerSource.includes('/hls/${streamSessionId()}/index.m3u8'));
-assert.match(playerSource, /requiredPlaybackBuffer\(videoTimelineSpeed\(video\)/);
+assert.match(playerSource, /requiredPlaybackBuffer\(videoPlaybackRate\(video\)/);
+assert.match(playerSource, /transcodedTailHasFrame/);
 assert.match(playerSource, /const completed = _wasBuffering \? null/);
 assert.match(
   playerSource,

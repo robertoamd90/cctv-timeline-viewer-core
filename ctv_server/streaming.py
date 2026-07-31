@@ -107,7 +107,14 @@ def _encoding_command(
         f"fps={fps},"
         f"scale=trunc(iw*{scale:g}/2)*2:trunc(ih*{scale:g}/2)*2:flags=fast_bilinear"
     )
-    decode_options = ["-skip_frame", "nokey"] if speed >= 8 else []
+    # Keyframe-only decoding is safe at a recording boundary. After an
+    # arbitrary seek it can produce no frames when the clip ends before the
+    # next source keyframe, so offset restarts use the normal decoder.
+    decode_options = (
+        ["-skip_frame", "nokey"]
+        if speed >= 8 and start_seconds < 0.5
+        else []
+    )
     return [
         "ffmpeg",
         "-nostdin",

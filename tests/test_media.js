@@ -69,6 +69,8 @@ assert.equal(timelineTimeForMedia(5, 100, 10, 4), 130);
 assert.match(playerSource, /preload="metadata"/);
 assert.match(playerSource, /v\.preload = S\.preloadMode/);
 assert.match(playerSource, /readyState < HTMLMediaElement\.HAVE_CURRENT_DATA/);
+assert.match(playerSource, /target > 0\.05/);
+assert.match(playerSource, /streamTransport === 'mp4'\) return true/);
 assert(playerSource.includes('/stream/${rec.id}'));
 assert(playerSource.includes("canPlayType('application/vnd.apple.mpegurl')"));
 assert.match(playerSource, /navigator\.maxTouchPoints > 0/);
@@ -78,8 +80,27 @@ assert.match(playerSource, /requiredPlaybackBuffer\(videoTimelineSpeed\(video\)/
 assert.match(playerSource, /const completed = _wasBuffering \? null/);
 assert.match(
   playerSource,
-  /showFreezeFrame\(v\);\s+[\s\S]*?if \(v\.dataset\.warming !== '1'\) v\.pause\(\)/,
-  'streams still warming must remain active behind the freeze frame',
+  /streamTransport === 'mp4' && v\.ended[\s\S]*?onVideoEnded\(v, recId\)/,
+  'a completed progressive warm-up stream must not be replayed from zero',
+);
+assert.match(playerSource, /S\.speed = speed;\s+_clockStartTime = S\.currentTime/);
+assert.match(playerSource, /dataset\.playbackRate = String\(S\.speed\)/);
+assert.match(playerSource, /speedSelect\.addEventListener\('input'/);
+assert.match(playerSource, /S\.playing && requiresWarmup/);
+assert.match(
+  playerSource,
+  /streamTransport !== 'mp4'[\s\S]*?target > 0\.1 && remaining > 0\.5/,
+  'a progressive stream must be reopened at the global time instead of sought in place',
+);
+assert.match(
+  playerSource,
+  /streamTransport === 'mp4'[\s\S]*?if \(remaining <= 0\.5\) return;[\s\S]*?restartProgressiveVideo\(video\)/,
+  'progressive stream alignment must not seek in place',
+);
+assert.match(
+  playerSource,
+  /const keepHlsWarming = v\.dataset\.warming === '1'[\s\S]*?if \(!keepHlsWarming\) v\.pause\(\)/,
+  'only HLS streams must advance behind the freeze frame while warming',
 );
 assert.match(playerSource, /ctv-preload-mode/);
 

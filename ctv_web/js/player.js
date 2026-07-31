@@ -54,10 +54,16 @@ function streamSessionId() {
 function seekVideo(video) {
   if (S.currentTime == null || video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
   const target = videoTargetTime(video);
-  // Assigning the target also asks a metadata-only player for the selected
-  // frame, including when that frame is at the beginning of the recording.
-  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
-      Math.abs(video.currentTime - target) > 0.05) {
+  // Progressive transcoding is positioned through its URL start offset and
+  // cannot be sought in place. Mid-stream realignment reopens that URL.
+  if (video.parentElement.dataset.streamTransport === 'mp4') return true;
+  // Reassigning an existing zero position before the first frame is decoded
+  // creates a redundant browser seek.
+  const needsMetadataSeek = video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA &&
+    target > 0.05;
+  if (needsMetadataSeek ||
+      (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+       Math.abs(video.currentTime - target) > 0.05)) {
     video.currentTime = target;
   }
   return true;
@@ -172,6 +178,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.onended = () => {
       if (v.dataset.metadataReady !== '1' || v.dataset.hasPlayed !== '1') return;
       if (_wasBuffering || v.dataset.warming === '1') {
+        if (cell.dataset.streamTransport === 'mp4' && v.ended) {
+          onVideoEnded(v, recId);
+          return;
+        }
         v.pause();
         seekVideo(v);
         return;
@@ -197,10 +207,11 @@ function updatePlayerCell(cell, cam, rec, cid) {
       v.dataset.hasPlayed = '1';
       if (_wasBuffering) {
         showFreezeFrame(v);
-        // A warming stream must keep advancing behind the freeze frame.
-        // Pausing native HLS here stops playlist refreshes in desktop
-        // browsers, so the initial segment can never reach the buffer target.
-        if (v.dataset.warming !== '1') v.pause();
+        // Native HLS must advance to refresh its playlist. Progressive MP4
+        // keeps downloading while paused and must stay at its zero-time anchor.
+        const keepHlsWarming = v.dataset.warming === '1' &&
+          cell.dataset.streamTransport === 'hls';
+        if (!keepHlsWarming) v.pause();
         return;
       }
       setPlayerStatus(cell, '');
@@ -499,13 +510,37 @@ function absoluteVideoTime(video) {
   );
 }
 
+function restartProgressiveVideo(video) {
+  const cell = video.parentElement;
+  const cid = parseInt(cell.dataset.cam);
+  const cam = S.cameras.find(camera => camera.id === cid);
+  const rec = findRecordingAt(cid, S.currentTime);
+  video.pause();
+  updatePlayerCell(cell, cam, rec, cid);
+  _playerCache[cid] = {
+    recId: rec ? String(rec.id) : '',
+    sourceKey: playerSourceKey(rec),
+  };
+}
+
 function enterBufferingBarrier(source, message) {
   if (source) {
     source.dataset.driftSeek = '0';
     setPlayerStatus(source.parentElement, message || t('player.buffering'));
   }
   if (!S.playing) return;
-  const videos = activeVideos();
+  let videos = activeVideos();
+  const restartProgressiveStreams = videos.filter(video => {
+    if (video.parentElement.dataset.streamTransport !== 'mp4') return false;
+    const target = videoTargetTime(video);
+    const duration = parseFloat(video.parentElement.dataset.duration);
+    const remaining = Number.isFinite(duration) ? duration - target : Infinity;
+    return target > 0.1 && remaining > 0.5;
+  });
+  if (restartProgressiveStreams.length) {
+    restartProgressiveStreams.forEach(restartProgressiveVideo);
+    videos = activeVideos();
+  }
   // S.currentTime is authoritative. A newly loaded video's currentTime is often
   // still zero here and must never be allowed to rewind the global clock.
   videos.forEach(video => {
@@ -527,8 +562,10 @@ function enterBufferingBarrier(source, message) {
 
 function alignVideos(videos) {
   let aligned = true;
+  let restartedProgressiveStream = false;
   videos.forEach(video => {
-    const start = parseFloat(video.parentElement.dataset.start);
+    const cell = video.parentElement;
+    const start = parseFloat(cell.dataset.start);
     if (!Number.isFinite(start) || S.currentTime == null) return;
     if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
       aligned = false;
@@ -536,11 +573,21 @@ function alignVideos(videos) {
     }
     const target = videoTargetTime(video);
     if (Math.abs(video.currentTime - target) > 0.1) {
+      if (cell.dataset.streamTransport === 'mp4') {
+        const duration = parseFloat(cell.dataset.duration);
+        const remaining = Number.isFinite(duration) ? duration - target : Infinity;
+        if (remaining <= 0.5) return;
+        restartProgressiveVideo(video);
+        restartedProgressiveStream = true;
+        aligned = false;
+        return;
+      }
       video.currentTime = target;
-      setPlayerStatus(video.parentElement, t('player.buffering'));
+      setPlayerStatus(cell, t('player.buffering'));
       aligned = false;
     }
   });
+  if (restartedProgressiveStream) enterBufferingBarrier(null, null);
   return aligned;
 }
 
@@ -585,14 +632,25 @@ function reloadPlaybackStreams() {
   }
 }
 
-document.getElementById('speed-select').onchange = function() {
-  S.speed = parseFloat(this.value);
+function applyPlaybackSpeed(value) {
+  const speed = parseFloat(value);
+  if (!Number.isFinite(speed) || speed <= 0 || speed === S.speed) return;
+  S.speed = speed;
+  _clockStartTime = S.currentTime;
+  _clockStartWall = performance.now();
   if (S.streamProfile === 'native') {
-    getVideos().forEach(v => { v.playbackRate = S.speed; });
+    getVideos().forEach(video => {
+      video.parentElement.dataset.playbackRate = String(S.speed);
+      video.playbackRate = S.speed;
+    });
   } else {
     reloadPlaybackStreams();
   }
-};
+}
+
+const speedSelect = document.getElementById('speed-select');
+speedSelect.addEventListener('input', () => applyPlaybackSpeed(speedSelect.value));
+speedSelect.addEventListener('change', () => applyPlaybackSpeed(speedSelect.value));
 
 document.getElementById('quality-select').onchange = function() {
   S.streamProfile = this.value;
@@ -736,13 +794,19 @@ function reconcilePlaybackPosition() {
     updateAutoHotspot(previousTime, S.currentTime);
   }
 
-  const needsRender = displayed.some(c => {
+  const transitions = displayed.map(c => {
     const rec = findRecordingAt(c.id, S.currentTime);
     const cachedId = _playerCache[c.id]?.recId ?? null;
-    return cachedId !== (rec ? String(rec.id) : '');
+    return { cachedId, nextId: rec ? String(rec.id) : '' };
   });
+  const needsRender = transitions.some(({ cachedId, nextId }) => cachedId !== nextId);
+  const requiresWarmup = transitions.some(({ cachedId, nextId }) =>
+    Boolean(nextId) && cachedId !== nextId
+  );
   if (needsRender) {
     renderPlayers();
-    if (S.playing) enterBufferingBarrier(null, null);
+    // Removing an ended camera must not pause streams that continue across the
+    // boundary. A new recording will enter the shared barrier as usual.
+    if (S.playing && requiresWarmup) enterBufferingBarrier(null, null);
   }
 }

@@ -36,6 +36,9 @@ function videoTargetTime(video, globalTime = S.currentTime) {
 }
 
 function supportsNativeHls(video) {
+  const mobilePlayback = navigator.maxTouchPoints > 0 &&
+    window.matchMedia('(pointer: coarse)').matches;
+  if (!mobilePlayback) return false;
   return Boolean(video.canPlayType('application/vnd.apple.mpegurl') ||
     video.canPlayType('application/x-mpegURL'));
 }
@@ -194,7 +197,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
       v.dataset.hasPlayed = '1';
       if (_wasBuffering) {
         showFreezeFrame(v);
-        v.pause();
+        // A warming stream must keep advancing behind the freeze frame.
+        // Pausing native HLS here stops playlist refreshes in desktop
+        // browsers, so the initial segment can never reach the buffer target.
+        if (v.dataset.warming !== '1') v.pause();
         return;
       }
       setPlayerStatus(cell, '');

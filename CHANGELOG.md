@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.25
+
+### Desktop compressed playback
+
+- Route Balanced and Fast playback through progressive MP4 on desktop browsers,
+  avoiding unreliable native HLS behavior reported by Chrome and Firefox.
+- Keep transcoded streams active behind the shared freeze frame while they
+  accumulate enough data to resume synchronized playback.
+- Preserve native HLS delivery on touch devices, where it remains the reliable
+  transport for mobile playback.
+- Prevent the buffering barrier from remaining permanently stuck on
+  "Source connection is slow" after the first compressed segment.
+
 ## 0.1.24
 
 ### Adaptive streaming

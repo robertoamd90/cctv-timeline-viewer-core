@@ -71,10 +71,16 @@ assert.match(playerSource, /v\.preload = S\.preloadMode/);
 assert.match(playerSource, /readyState < HTMLMediaElement\.HAVE_CURRENT_DATA/);
 assert(playerSource.includes('/stream/${rec.id}'));
 assert(playerSource.includes("canPlayType('application/vnd.apple.mpegurl')"));
+assert.match(playerSource, /navigator\.maxTouchPoints > 0/);
+assert.match(playerSource, /if \(!mobilePlayback\) return false/);
 assert(playerSource.includes('/hls/${streamSessionId()}/index.m3u8'));
 assert.match(playerSource, /requiredPlaybackBuffer\(videoTimelineSpeed\(video\)/);
 assert.match(playerSource, /const completed = _wasBuffering \? null/);
-assert.match(playerSource, /showFreezeFrame\(v\);\s+v\.pause\(\)/);
+assert.match(
+  playerSource,
+  /showFreezeFrame\(v\);\s+[\s\S]*?if \(v\.dataset\.warming !== '1'\) v\.pause\(\)/,
+  'streams still warming must remain active behind the freeze frame',
+);
 assert.match(playerSource, /ctv-preload-mode/);
 
 console.log('Media state tests passed');

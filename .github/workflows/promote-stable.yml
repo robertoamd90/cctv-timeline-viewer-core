@@ -43,6 +43,16 @@ jobs:
               ;;
           esac
           source_sha="$(git rev-parse HEAD)"
+          stable_tag="v${version}"
+          stable_sha="$(git rev-list -n 1 "$stable_tag" 2>/dev/null || true)"
+          if [ -z "$stable_sha" ]; then
+            echo "Create and push $stable_tag on $source_sha before promotion" >&2
+            exit 1
+          fi
+          if [ "$stable_sha" != "$source_sha" ]; then
+            echo "$stable_tag points to $stable_sha, expected $source_sha" >&2
+            exit 1
+          fi
           python scripts/create_release_request.py \
             stable "$version" "$source_sha" "$candidate" /tmp/stable.json \
             --candidate "$candidate_version"
@@ -81,20 +91,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python scripts/wait_for_catalog.py stable "${{ inputs.version }}"
 
-      - name: Create stable tag and release
+      - name: Create stable release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           tag="${{ steps.release.outputs.tag }}"
-          source_sha="${{ steps.release.outputs.source_sha }}"
-          if git rev-parse "$tag" >/dev/null 2>&1; then
-            test "$(git rev-list -n 1 "$tag")" = "$source_sha"
-          else
-            git tag -a "$tag" "$source_sha" -m "CCTV Viewer ${{ inputs.version }}"
-            git push origin "$tag"
-          fi
           gh release view "$tag" >/dev/null 2>&1 ||
             gh release create "$tag" \
               --title "CCTV Viewer ${{ inputs.version }}" \

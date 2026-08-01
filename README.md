@@ -160,9 +160,14 @@ git push origin v0.2.0-beta.1
 After validating that candidate, promote the exact artifact:
 
 ```bash
+candidate=v0.2.0-beta.1
+version=0.2.0
+source_sha="$(git rev-list -n 1 "$candidate")"
+git tag -a "v$version" "$source_sha" -m "CCTV Viewer $version"
+git push origin "v$version"
 gh workflow run promote-stable.yml \
-  -f candidate=v0.2.0-beta.1 \
-  -f version=0.2.0
+  -f candidate="$candidate" \
+  -f version="$version"
 ```
 
 The source workflow writes a release request to the catalog. The catalog owns

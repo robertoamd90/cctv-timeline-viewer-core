@@ -49,15 +49,21 @@ overwrite an existing tag.
 After validating the selected Beta:
 
 ```bash
+candidate=v0.2.0-beta.3
+version=0.2.0
+source_sha="$(git rev-list -n 1 "$candidate")"
+git tag -a "v$version" "$source_sha" -m "CCTV Viewer $version"
+git push origin "v$version"
 gh workflow run promote-stable.yml \
-  -f candidate=v0.2.0-beta.3 \
-  -f version=0.2.0
+  -f candidate="$candidate" \
+  -f version="$version"
 ```
 
 The catalog copies the tested multi-architecture Beta image into the stable
-package. It does not rebuild application code. Once the stable manifest is
-published, the core workflow creates `v0.2.0` on the candidate commit and
-creates the GitHub release.
+package. It does not rebuild application code. The operator-created stable tag
+is required because GitHub Actions tokens cannot create a tag that introduces
+workflow files. The workflow verifies that `v0.2.0` points to the candidate
+commit, then creates the GitHub release after the stable manifest is published.
 
 The workflow is idempotent. Re-running it with the same candidate and version
 must resolve to the same source SHA.

@@ -609,7 +609,6 @@ function alignVideos(videos) {
 function stopPlayback() {
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   S.playing = false;
-  void syncPlaybackWakeLock();
   _wasBuffering = false;
   getVideos().forEach(v => {
     v.dataset.warming = '0';
@@ -632,67 +631,9 @@ document.getElementById('btn-play').onclick = () => {
     return;
   }
   S.playing = true; updatePlayButton();
-  void syncPlaybackWakeLock();
   enterBufferingBarrier(null, null);
   startClock();
 };
-
-let _screenWakeLock = null;
-let _wakeLockRequest = null;
-let _wakeLockGeneration = 0;
-let _videoWakeLockFallbackActive = false;
-const _needsVideoWakeLockFallback = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-
-function syncVideoWakeLockFallback(shouldHold) {
-  const fallback = window.PlaybackKeepAwakeFallback;
-  if (!fallback || !_needsVideoWakeLockFallback) return;
-  if (!shouldHold) {
-    fallback.disable();
-    _videoWakeLockFallbackActive = false;
-    return;
-  }
-  if (_videoWakeLockFallbackActive) return;
-  _videoWakeLockFallbackActive = true;
-  fallback.enable().catch(() => { _videoWakeLockFallbackActive = false; });
-}
-
-async function syncPlaybackWakeLock() {
-  const shouldHold = S.playing && document.visibilityState === 'visible';
-  syncVideoWakeLockFallback(shouldHold);
-  if (!shouldHold) {
-    _wakeLockGeneration += 1;
-    const lock = _screenWakeLock;
-    _screenWakeLock = null;
-    if (lock) await lock.release().catch(() => {});
-    return;
-  }
-  if (!navigator.wakeLock?.request || _screenWakeLock || _wakeLockRequest) return;
-
-  const generation = ++_wakeLockGeneration;
-  _wakeLockRequest = navigator.wakeLock.request('screen');
-  try {
-    const lock = await _wakeLockRequest;
-    if (generation !== _wakeLockGeneration || !S.playing || document.visibilityState !== 'visible') {
-      await lock.release().catch(() => {});
-      return;
-    }
-    _screenWakeLock = lock;
-    lock.addEventListener('release', () => {
-      if (_screenWakeLock === lock) _screenWakeLock = null;
-    });
-  } catch {
-    // Wake Lock is optional: playback must remain usable when unavailable or denied.
-  } finally {
-    _wakeLockRequest = null;
-    if (generation !== _wakeLockGeneration && S.playing &&
-        document.visibilityState === 'visible' && !_screenWakeLock) {
-      void syncPlaybackWakeLock();
-    }
-  }
-}
-
-document.addEventListener('visibilitychange', () => { void syncPlaybackWakeLock(); });
 
 function reloadPlaybackStreams() {
   const wasPlaying = S.playing;

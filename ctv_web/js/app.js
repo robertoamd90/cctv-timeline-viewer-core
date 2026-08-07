@@ -589,6 +589,28 @@ document.getElementById('btn-page-next').onclick = () => {
   S.page = Math.min(pages - 1, S.page + 1); updateGridLayout(); renderPlayers(); renderViewerCameraList();
 };
 
+function setMobileToolbarCollapsed(collapsed, persist = true) {
+  const toolbar = document.getElementById('toolbar');
+  const button = document.getElementById('btn-mobile-toolbar-toggle');
+  toolbar.classList.toggle('mobile-secondary-collapsed', collapsed);
+  button.textContent = collapsed ? '⌄' : '⌃';
+  button.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  const label = t(collapsed ? 'controls.showMoreControls' : 'controls.hideMoreControls');
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  if (persist) localStorage.setItem('ctv-mobile-toolbar-collapsed', collapsed ? '1' : '0');
+  requestAnimationFrame(() => {
+    updateGridLayout();
+    renderPlayers();
+  });
+}
+
+document.getElementById('btn-mobile-toolbar-toggle').onclick = () => {
+  const toolbar = document.getElementById('toolbar');
+  setMobileToolbarCollapsed(!toolbar.classList.contains('mobile-secondary-collapsed'));
+};
+setMobileToolbarCollapsed(localStorage.getItem('ctv-mobile-toolbar-collapsed') === '1', false);
+
 function setSidebarCollapsed(collapsed, persist = true) {
   document.getElementById('viewer-sidebar').classList.toggle('collapsed', collapsed);
   if (persist) localStorage.setItem('ctv-sidebar-collapsed', collapsed ? '1' : '0');
@@ -1233,4 +1255,8 @@ window._ctvRefreshLanguage = function() {
   renderPlayers();
   updatePlayButton();
   updateTimeDisplay();
+  setMobileToolbarCollapsed(
+    document.getElementById('toolbar').classList.contains('mobile-secondary-collapsed'),
+    false,
+  );
 };

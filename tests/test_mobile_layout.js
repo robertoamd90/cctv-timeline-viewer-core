@@ -12,10 +12,14 @@ assert(controls[1].includes('id="stream-options-wrap"'));
 assert(controls[1].includes('id="quality-select"'));
 assert(controls[1].includes('id="preload-select"'));
 assert(controls[1].includes('id="auto-hotspot-control"'));
+assert(html.includes('id="btn-mobile-toolbar-toggle"'));
 
 assert(css.includes('display: grid; grid-row: 3; grid-column: 1 / 5;'));
 assert(css.includes('grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.72fr);'));
 assert(css.includes('#stream-options-menu { position: fixed;'));
 assert(!css.includes('#auto-hotspot-control { grid-row: 4;'));
+assert(css.includes('#toolbar #auto-hotspot-control input { min-height: 14px; padding: 0; }'));
+assert(css.includes('#toolbar.mobile-secondary-collapsed > .date-nav'));
+assert(css.includes('#toolbar.mobile-secondary-collapsed > #view-controls'));
 
 console.log('Mobile toolbar layout tests passed');

@@ -70,6 +70,7 @@ body {
 #toolbar .group button:first-child { border-radius: 6px 0 0 6px; }
 #toolbar .group button:last-child { border-radius: 0 6px 6px 0; border-right: 1px solid var(--border); }
 #toolbar .spacer { flex: 1; }
+#btn-mobile-toolbar-toggle { display: none; }
 .toolbar-divider { width: 1px; height: 22px; background: var(--border); margin: 0 3px; flex-shrink: 0; }
 .date-nav input { border-radius: 0; border-right: 0; }
 #camera-filter-wrap, #stream-options-wrap { position: relative; }
@@ -466,7 +467,7 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   #toolbar {
     display: grid; grid-template-columns: 44px 88px 64px minmax(142px, 1fr);
     align-items: center;
-    gap: 5px; padding: 5px 8px; overflow: visible;
+    gap: 5px; padding: 5px 8px; overflow: visible; position: relative;
   }
   #toolbar > .toolbar-divider, #toolbar > .spacer, #btn-today,
   #btn-sidebar, #aspect-select, #custom-grid-controls { display: none !important; }
@@ -496,6 +497,7 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
     width: 100%; min-height: 42px; padding-inline: 9px;
     justify-self: stretch; justify-content: center;
   }
+  #toolbar #auto-hotspot-control input { min-height: 14px; padding: 0; }
   .auto-hotspot-label-long { display: none; }
   .auto-hotspot-label-short { display: inline; }
   #btn-camera-filter, #btn-stream-options {
@@ -508,6 +510,17 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   #page-display { min-width: 28px; }
   #camera-filter-menu { position: fixed; top: 132px; left: 8px; right: 8px; width: auto; max-height: 55dvh; }
   #stream-options-menu { position: fixed; top: 132px; left: 8px; right: 8px; width: auto; }
+  #toolbar #btn-mobile-toolbar-toggle {
+    display: block; position: absolute; z-index: 75; left: 50%; bottom: -12px;
+    width: 64px; height: 24px; min-height: 24px; padding: 0;
+    transform: translateX(-50%); border-radius: 0 0 12px 12px;
+    font-size: 14px; line-height: 20px; color: var(--text-dim);
+  }
+  #toolbar #btn-mobile-toolbar-toggle:active { transform: translateX(-50%) scale(0.98); }
+  #toolbar.mobile-secondary-collapsed > .date-nav,
+  #toolbar.mobile-secondary-collapsed > #time-display,
+  #toolbar.mobile-secondary-collapsed > #view-controls,
+  #toolbar.mobile-secondary-collapsed > #page-controls { display: none !important; }
 
   #viewer-sidebar { position: absolute; z-index: 70; top: 0; bottom: 0; width: 230px; box-shadow: 8px 0 24px rgba(0,0,0,0.5); }
   #viewer-workspace { position: relative; }

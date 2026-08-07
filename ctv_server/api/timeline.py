@@ -101,7 +101,7 @@ def get_timeline(
             statuses = [row["status"] for row in partitions]
             progress_done = sum(row["progress_done"] for row in partitions)
             progress_total = sum(row["progress_total"] for row in partitions)
-            if any(status == "scanning" for status in statuses):
+            if any(status in {"queued", "scanning"} for status in statuses):
                 state = "scanning"
             elif any(status == "error" for status in statuses):
                 state = "error"

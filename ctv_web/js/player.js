@@ -5,6 +5,7 @@
 let _clockStartTime = null, _clockStartWall = null, _tickId = null;
 let _playerCache = {};  // camId → {recId, sourceKey}
 let _wasBuffering = false;
+let _lastPlaybackUiUpdate = 0;
 
 function playerSourceKey(rec) {
   if (!rec) return '';
@@ -358,10 +359,7 @@ function findRecordingAt(cameraId, ts) {
   if (!S.timeline || ts == null) return null;
   const cam = S.timeline.cameras.find(c => c.camera_id === cameraId);
   if (!cam) return null;
-  const recording = cam.segments.find(
-    segment => ts >= segment.start_ts &&
-      (segment.end_ts == null || ts < segment.end_ts)
-  ) || null;
+  const recording = CtvMedia.recordingAt(cam.segments, ts);
   if (!recording || S.streamProfile === 'native' || recording.end_ts == null) {
     return recording;
   }
@@ -687,7 +685,17 @@ function updatePlayButton() {
   button.setAttribute('aria-label', S.playing ? t('controls.pause') : t('controls.play'));
 }
 function updateTimeDisplay() {
-  document.getElementById('time-display').textContent = S.currentTime ? fmtTime(S.currentTime) : '--';
+  const display = document.getElementById('time-display');
+  const value = S.currentTime ? fmtTime(S.currentTime) : '--';
+  if (display.textContent !== value) display.textContent = value;
+}
+function updatePlaybackUi(force = false) {
+  const now = performance.now();
+  const interval = isCompactViewport() ? 50 : 33;
+  if (!force && now - _lastPlaybackUiUpdate < interval) return;
+  _lastPlaybackUiUpdate = now;
+  updateTimeDisplay();
+  updateCursor();
 }
 
 // ── Global clock ──
@@ -695,6 +703,7 @@ function startClock() {
   if (_tickId) cancelAnimationFrame(_tickId);
   _clockStartTime = S.currentTime;
   _clockStartWall = performance.now();
+  updatePlaybackUi(true);
   clockTick();
 }
 
@@ -763,8 +772,7 @@ function clockTick() {
     S.currentTime = _clockStartTime + elapsed;
   }
 
-  updateTimeDisplay();
-  updateCursor();
+  updatePlaybackUi();
   updateAutoHotspot(previousTime, S.currentTime);
 
   // Auto-scroll

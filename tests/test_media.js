@@ -7,11 +7,13 @@ const {
   timelinePlaybackSpeed,
   playbackPlan,
   transcodedTailHasFrame,
+  recordingAt,
   mediaTimeForTimeline,
   timelineTimeForMedia,
   medianTime,
 } = require('../ctv_web/js/media.js');
 const playerSource = fs.readFileSync(require.resolve('../ctv_web/js/player.js'), 'utf8');
+const timelineSource = fs.readFileSync(require.resolve('../ctv_web/js/timeline.js'), 'utf8');
 
 assert.equal(medianTime([]), null);
 assert.equal(medianTime([12]), 12);
@@ -71,6 +73,15 @@ assert.equal(
   'a transcoded tail too short to produce one output frame must be skipped',
 );
 assert.equal(transcodedTailHasFrame(1, 8, 8), true);
+const orderedSegments = Array.from({length: 10000}, (_, index) => ({
+  id: index,
+  start_ts: index * 10,
+  end_ts: index * 10 + 5,
+}));
+assert.equal(recordingAt(orderedSegments, 54321).id, 5432);
+assert.equal(recordingAt(orderedSegments, 54326), null);
+assert.equal(recordingAt(orderedSegments, -1), null);
+assert.equal(recordingAt([], 10), null);
 assert.equal(mediaTimeForTimeline(130, 100, 10, 4, 20), 5);
 assert.equal(timelineTimeForMedia(5, 100, 10, 4), 130);
 
@@ -86,6 +97,7 @@ assert.match(playerSource, /if \(!mobilePlayback\) return false/);
 assert(playerSource.includes('/hls/${streamSessionId()}/index.m3u8'));
 assert.match(playerSource, /requiredPlaybackBuffer\(videoPlaybackRate\(video\)/);
 assert.match(playerSource, /transcodedTailHasFrame/);
+assert.match(playerSource, /CtvMedia\.recordingAt/);
 assert.match(playerSource, /const completed = _wasBuffering \? null/);
 assert.match(
   playerSource,
@@ -112,5 +124,17 @@ assert.match(
   'only HLS streams must advance behind the freeze frame while warming',
 );
 assert.match(playerSource, /ctv-preload-mode/);
+assert.match(playerSource, /function updatePlaybackUi/);
+assert.match(playerSource, /isCompactViewport\(\) \? 50 : 33/);
+assert.match(timelineSource, /function updateOverviewPlayhead/);
+const updateCursorSource = timelineSource.slice(
+  timelineSource.indexOf('function updateCursor()'),
+  timelineSource.indexOf('function updateOverviewPlayhead()'),
+);
+assert.doesNotMatch(
+  updateCursorSource,
+  /renderOverview\(/,
+  'moving the playhead must not redraw every timeline segment',
+);
 
 console.log('Media state tests passed');

@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ctv_server import db
 from ctv_server.api.system import stream_profiles, update_stream_profiles
@@ -18,6 +19,7 @@ from ctv_server.streaming import (
     initial_hls_segment_count,
     shutdown_hls_jobs,
 )
+from ctv_server import streaming
 
 
 class StreamProfileTests(unittest.TestCase):
@@ -197,6 +199,30 @@ class TranscodeCommandTests(unittest.TestCase):
                 await shutdown_hls_jobs()
 
             asyncio.run(scenario())
+
+    def test_idle_progressive_transcode_is_terminated(self):
+        class FakeProcess:
+            returncode = None
+            terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        async def scenario():
+            process = FakeProcess()
+            last_delivery = [0.0]
+            with patch.object(streaming, "_TRANSCODE_IDLE_TIMEOUT", 0.01):
+                await streaming._stop_idle_transcode(process, last_delivery)
+            self.assertTrue(process.terminated)
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

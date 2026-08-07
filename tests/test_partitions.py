@@ -58,7 +58,7 @@ class PartitionIndexTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         pending = get_timeline(start, end, str(self.camera_id))
         self.assertEqual(len(pending["cameras"]), 1)
-        self.assertEqual(pending["cameras"][0]["partition_status"], "unknown")
+        self.assertEqual(pending["cameras"][0]["partition_status"], "scanning")
         self.assertEqual(pending["cameras"][0]["segments"], [])
         run_partition_scan(self.camera_id, jobs[0]["key"], jobs[0]["path"])
 
@@ -131,6 +131,38 @@ class PartitionIndexTests(unittest.TestCase):
         worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
         self.assertEqual(errors, [])
+
+    def test_concurrent_preparation_queues_partition_only_once(self):
+        tz = ZoneInfo("Europe/Rome")
+        start = datetime(2026, 7, 11, 0, 0, tzinfo=tz).timestamp()
+        end = datetime(2026, 7, 12, 0, 0, tzinfo=tz).timestamp()
+        barrier = threading.Barrier(3)
+        results = []
+
+        def prepare():
+            barrier.wait()
+            results.append(prepare_partitions([self.camera_id], start, end))
+
+        workers = [threading.Thread(target=prepare) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=2)
+
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(sum(len(jobs) for jobs in results), 1)
+
+    def test_missing_partition_respects_refresh_ttl(self):
+        tz = ZoneInfo("Europe/Rome")
+        start = datetime(2026, 7, 12, 0, 0, tzinfo=tz).timestamp()
+        end = datetime(2026, 7, 13, 0, 0, tzinfo=tz).timestamp()
+
+        jobs = prepare_partitions([self.camera_id], start, end)
+        self.assertEqual(len(jobs), 1)
+        run_partition_scan(self.camera_id, jobs[0]["key"], jobs[0]["path"])
+
+        self.assertEqual(prepare_partitions([self.camera_id], start, end), [])
 
     def _prepare_without_error(self, start, end, errors):
         try:

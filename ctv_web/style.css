@@ -147,6 +147,10 @@ body {
   position: sticky; top: 0; z-index: 5; margin-left: var(--timeline-label-w);
 }
 #overview canvas { width: 100%; height: 100%; display: block; cursor: pointer; }
+#overview-playhead {
+  position: absolute; inset-block: 0; width: 2px; transform: translateX(-1px);
+  background: var(--playhead); pointer-events: none;
+}
 
 #timeline-ruler {
   height: 28px; background: var(--surface2); border-bottom: 1px solid var(--border);

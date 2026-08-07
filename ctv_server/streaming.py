@@ -21,6 +21,9 @@ _HLS_ROOT = Path(os.environ.get(
 ))
 _HLS_TTL_SECONDS = max(30, int(os.environ.get("CTV_HLS_TTL_SECONDS", "300")))
 _HLS_START_TIMEOUT = max(10, int(os.environ.get("CTV_HLS_START_TIMEOUT", "30")))
+_TRANSCODE_IDLE_TIMEOUT = max(
+    5.0, float(os.environ.get("CTV_TRANSCODE_IDLE_TIMEOUT", "30")),
+)
 _HLS_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 _HLS_SEGMENT_PATTERN = re.compile(r"^segment_\d{5}\.ts$")
 
@@ -39,6 +42,7 @@ class HlsJob:
 _hls_jobs: dict[str, HlsJob] = {}
 _hls_lock = asyncio.Lock()
 _hls_tasks: set[asyncio.Task] = set()
+_progressive_processes: set[asyncio.subprocess.Process] = set()
 log = logging.getLogger("ctv.streaming")
 
 
@@ -213,6 +217,25 @@ async def _stop_process(process: asyncio.subprocess.Process):
     except asyncio.TimeoutError:
         process.kill()
         await process.wait()
+
+
+async def _stop_idle_transcode(
+    process: asyncio.subprocess.Process,
+    last_delivery: list[float],
+):
+    while process.returncode is None:
+        remaining = _TRANSCODE_IDLE_TIMEOUT - (
+            time.monotonic() - last_delivery[0]
+        )
+        if remaining > 0:
+            await asyncio.sleep(min(remaining, 1.0))
+            continue
+        log.warning(
+            "Stopping progressive transcode after %.1fs without client delivery",
+            _TRANSCODE_IDLE_TIMEOUT,
+        )
+        await _stop_process(process)
+        return
 
 
 @asynccontextmanager
@@ -397,6 +420,12 @@ async def shutdown_hls_jobs():
         *(_stop_process(job.process) for job in jobs),
         return_exceptions=True,
     )
+    progressive = list(_progressive_processes)
+    _progressive_processes.clear()
+    await asyncio.gather(
+        *(_stop_process(process) for process in progressive),
+        return_exceptions=True,
+    )
     shutil.rmtree(_HLS_ROOT, ignore_errors=True)
 
 
@@ -412,12 +441,21 @@ async def transcode_stream(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        _progressive_processes.add(process)
+        last_delivery = [time.monotonic()]
+        idle_task = asyncio.create_task(
+            _stop_idle_transcode(process, last_delivery)
+        )
         try:
             while True:
                 chunk = await process.stdout.read(256 * 1024)
                 if not chunk:
                     break
+                last_delivery[0] = time.monotonic()
                 yield chunk
             await process.wait()
         finally:
+            idle_task.cancel()
+            await asyncio.gather(idle_task, return_exceptions=True)
             await _stop_process(process)
+            _progressive_processes.discard(process)

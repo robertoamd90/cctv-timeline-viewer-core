@@ -3,16 +3,19 @@
    ═══════════════════════════════════════════ */
 
 const MIN_ZOOM_RANGE = 3;
-let _overviewLastUpdate = 0;
+let _timelineLabelWidthCache = null;
 
 function timeToX(ts, vFrom, vTo, width) {
   return ((ts - vFrom) / ((vTo - vFrom) || 1)) * width;
 }
 
 function timelineLabelWidth() {
+  if (_timelineLabelWidthCache != null) return _timelineLabelWidthCache;
   const value = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--timeline-label-w'));
-  return Number.isFinite(value) ? value : 110;
+  _timelineLabelWidthCache = Number.isFinite(value) ? value : 110;
+  return _timelineLabelWidthCache;
 }
+window.addEventListener('resize', () => { _timelineLabelWidthCache = null; });
 
 function rowWidth() {
   const inner = document.getElementById('timeline-inner');
@@ -75,7 +78,6 @@ function renderOverview(vFrom, vTo, width) {
   const overview = document.getElementById('overview');
   const style = getComputedStyle(document.documentElement);
   const surface2 = style.getPropertyValue('--surface2').trim() || '#1c2333';
-  const playheadColor = style.getPropertyValue('--playhead').trim() || '#f78166';
 
   let canvas = overview.querySelector('canvas');
   if (!canvas) {
@@ -88,6 +90,12 @@ function renderOverview(vFrom, vTo, width) {
       const ts = S.timeline.from + (x / rect.width) * (S.timeline.to - S.timeline.from);
       seekTo(ts);
     };
+  }
+  let playhead = overview.querySelector('#overview-playhead');
+  if (!playhead) {
+    playhead = document.createElement('div');
+    playhead.id = 'overview-playhead';
+    overview.appendChild(playhead);
   }
   canvas.width = overview.clientWidth || 800;
   canvas.height = 32;
@@ -116,13 +124,7 @@ function renderOverview(vFrom, vTo, width) {
   const frameRight = Math.min(canvas.width - 0.5, vpRight - 0.5);
   ctx.strokeRect(frameLeft, 0.5, Math.max(0, frameRight - frameLeft), canvas.height - 1);
 
-  if (S.currentTime != null) {
-    const px = ((S.currentTime - S.timeline.from) / totalRange) * canvas.width;
-    ctx.strokeStyle = playheadColor; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, canvas.height); ctx.stroke();
-  }
-
-  _overviewLastUpdate = performance.now();
+  updateOverviewPlayhead();
 }
 
 function renderRows(vFrom, vTo, segW, rW) {
@@ -243,15 +245,22 @@ function updateCursor() {
   const x = timeToX(S.currentTime, vFrom, vTo, S.rWidth);
   p.style.left = (timelineLabelWidth() + x) + 'px';  // playhead nel body → compensa label
   if (pr) pr.style.left = x + 'px';                  // playhead nel ruler → già allineato
-  const overviewInterval = isCompactViewport() ? 250 : 120;
-  if (performance.now() - _overviewLastUpdate >= overviewInterval) updateViewportIndicator();
+  updateOverviewPlayhead();
 }
-function updateViewportIndicator() {
-  if (!S.timeline) return;
+function updateOverviewPlayhead() {
   const overview = document.getElementById('overview');
-  const canvas = overview.querySelector('canvas');
-  if (!canvas) return;
-  renderOverview(S.zoomRange[0], S.zoomRange[1], contentWidth());
+  const playhead = overview.querySelector('#overview-playhead');
+  if (!playhead || !S.timeline || S.currentTime == null) {
+    if (playhead) playhead.hidden = true;
+    return;
+  }
+  const totalRange = S.timeline.to - S.timeline.from;
+  if (totalRange <= 0 || S.currentTime < S.timeline.from || S.currentTime > S.timeline.to) {
+    playhead.hidden = true;
+    return;
+  }
+  playhead.hidden = false;
+  playhead.style.left = `${((S.currentTime - S.timeline.from) / totalRange) * 100}%`;
 }
 
 // ── Zoom ──

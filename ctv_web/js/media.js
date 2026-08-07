@@ -48,6 +48,26 @@
     return remainingTimeline * fps / speed >= 1;
   }
 
+  function recordingAt(segments, timestamp) {
+    let low = 0;
+    let high = segments.length - 1;
+    let candidate = null;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      const segment = segments[middle];
+      if (segment.start_ts <= timestamp) {
+        candidate = segment;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (!candidate) return null;
+    return candidate.end_ts == null || timestamp < candidate.end_ts
+      ? candidate
+      : null;
+  }
+
   function mediaTimeForTimeline(
     globalTime, recordingStart, streamOffset, streamSpeed, expectedDuration,
   ) {
@@ -76,6 +96,7 @@
     timelinePlaybackSpeed,
     playbackPlan,
     transcodedTailHasFrame,
+    recordingAt,
     mediaTimeForTimeline,
     timelineTimeForMedia,
     medianTime,

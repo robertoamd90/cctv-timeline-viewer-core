@@ -54,7 +54,7 @@ def invalidate_partition(camera_id: int, key: str, path: str) -> dict:
             VALUES (?, ?, ?, 'missing', NULL, ?, 0)
             ON CONFLICT(camera_id, partition_key) DO UPDATE SET
                 path=excluded.path, status='missing', error=NULL,
-                last_requested=excluded.last_requested, file_count=0,
+                last_requested=excluded.last_requested, last_scanned=excluded.last_requested, file_count=0,
                 progress_done=0, progress_total=0
         """, (camera_id, key, path, time.time()))
         conn.execute(
@@ -243,14 +243,15 @@ def _prepare_partitions(
             default_ttl = "60" if candidate["is_today"] else "300"
             ttl = int(os.environ.get("CTV_ACTIVE_PARTITION_SECONDS", default_ttl))
             stale = not row["last_scanned"] or now - row["last_scanned"] >= ttl
-            if not candidate["exists"]:
+            in_progress = row["status"] in {"queued", "scanning"}
+            if stale and not in_progress and not _lock_for(camera_id, key).locked():
+                conn.execute(
+                    "UPDATE partitions SET status = 'queued' "
+                    "WHERE camera_id = ? AND partition_key = ?",
+                    (camera_id, key),
+                )
                 jobs.append({
                     "camera_id": camera_id, "key": key, "path": path,
-                    "missing": True, "generation": generation,
-                })
-            elif stale and not _lock_for(camera_id, key).locked():
-                jobs.append({
-                    "camera_id": camera_id, "key": key, "path": path,
-                    "missing": False, "generation": generation,
+                    "missing": not candidate["exists"], "generation": generation,
                 })
     return jobs

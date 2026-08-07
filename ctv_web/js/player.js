@@ -640,9 +640,26 @@ document.getElementById('btn-play').onclick = () => {
 let _screenWakeLock = null;
 let _wakeLockRequest = null;
 let _wakeLockGeneration = 0;
+let _videoWakeLockFallbackActive = false;
+const _needsVideoWakeLockFallback = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+function syncVideoWakeLockFallback(shouldHold) {
+  const fallback = window.PlaybackKeepAwakeFallback;
+  if (!fallback || !_needsVideoWakeLockFallback) return;
+  if (!shouldHold) {
+    fallback.disable();
+    _videoWakeLockFallbackActive = false;
+    return;
+  }
+  if (_videoWakeLockFallbackActive) return;
+  _videoWakeLockFallbackActive = true;
+  fallback.enable().catch(() => { _videoWakeLockFallbackActive = false; });
+}
 
 async function syncPlaybackWakeLock() {
   const shouldHold = S.playing && document.visibilityState === 'visible';
+  syncVideoWakeLockFallback(shouldHold);
   if (!shouldHold) {
     _wakeLockGeneration += 1;
     const lock = _screenWakeLock;

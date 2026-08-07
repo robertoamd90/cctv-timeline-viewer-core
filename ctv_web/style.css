@@ -71,6 +71,7 @@ body {
 #toolbar .group button:last-child { border-radius: 0 6px 6px 0; border-right: 1px solid var(--border); }
 #toolbar .spacer { flex: 1; }
 #btn-mobile-toolbar-toggle { display: none; }
+#zoom-controls #btn-zoom-fit { border-radius: 0 6px 6px 0; border-right: 1px solid var(--border); }
 .toolbar-divider { width: 1px; height: 22px; background: var(--border); margin: 0 3px; flex-shrink: 0; }
 .date-nav input { border-radius: 0; border-right: 0; }
 #camera-filter-wrap, #stream-options-wrap { position: relative; }
@@ -467,7 +468,7 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   #toolbar {
     display: grid; grid-template-columns: 44px 88px 64px minmax(142px, 1fr);
     align-items: center;
-    gap: 5px; padding: 5px 8px; overflow: visible; position: relative;
+    gap: 5px; padding: 5px 8px; overflow: visible;
   }
   #toolbar > .toolbar-divider, #toolbar > .spacer, #btn-today,
   #btn-sidebar, #aspect-select, #custom-grid-controls { display: none !important; }
@@ -478,9 +479,10 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   #speed-select { grid-row: 1; grid-column: 3; width: 64px !important; }
   #zoom-controls {
     grid-row: 1; grid-column: 4; width: 100%; display: grid !important;
-    grid-template-columns: 42px 42px minmax(50px, 1fr);
+    grid-template-columns: 42px 42px minmax(50px, 1fr) 42px;
   }
   #zoom-controls button { width: 100%; padding-inline: 4px; white-space: nowrap; }
+  #zoom-controls #btn-zoom-fit { border-radius: 0; border-right: none; }
   #time-display {
     grid-row: 2; grid-column: 4; min-width: 0; width: 100%; align-self: center;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; text-align: center;
@@ -511,12 +513,9 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   #camera-filter-menu { position: fixed; top: 132px; left: 8px; right: 8px; width: auto; max-height: 55dvh; }
   #stream-options-menu { position: fixed; top: 132px; left: 8px; right: 8px; width: auto; }
   #toolbar #btn-mobile-toolbar-toggle {
-    display: block; position: absolute; z-index: 75; left: 50%; bottom: -12px;
-    width: 64px; height: 24px; min-height: 24px; padding: 0;
-    transform: translateX(-50%); border-radius: 0 0 12px 12px;
-    font-size: 14px; line-height: 20px; color: var(--text-dim);
+    display: block; width: 100%; min-height: 42px; padding-inline: 4px;
+    font-size: 14px; color: var(--text-dim);
   }
-  #toolbar #btn-mobile-toolbar-toggle:active { transform: translateX(-50%) scale(0.98); }
   #toolbar.mobile-secondary-collapsed > .date-nav,
   #toolbar.mobile-secondary-collapsed > #time-display,
   #toolbar.mobile-secondary-collapsed > #view-controls,

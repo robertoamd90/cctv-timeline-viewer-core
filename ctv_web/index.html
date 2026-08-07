@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=0.1.20">
+<link rel="stylesheet" href="style.css?v=0.1.21">
 </head>
 <body>
 
@@ -107,8 +107,8 @@
       <button id="btn-zoom-in" data-i18n-aria-label="controls.zoomIn" data-i18n-title="controls.zoomIn">+</button>
       <button id="btn-zoom-out" data-i18n-aria-label="controls.zoomOut" data-i18n-title="controls.zoomOut">−</button>
       <button id="btn-zoom-fit" data-i18n-aria-label="controls.fitTimeline" data-i18n-title="controls.fitTimeline">↔</button>
+      <button id="btn-mobile-toolbar-toggle" type="button" aria-expanded="true">⌃</button>
     </div>
-    <button id="btn-mobile-toolbar-toggle" type="button" aria-expanded="true">⌃</button>
   </div>
 
   <div id="viewer-workspace">
@@ -261,7 +261,8 @@
 <script src="js/app.js?v=0.1.20"></script>
 <script src="js/timeline.js?v=0.1.19"></script>
 <script src="js/media.js?v=0.1.27"></script>
-<script src="js/player.js?v=0.1.30"></script>
+<script src="js/keep-awake-fallback.js?v=0.1.1"></script>
+<script src="js/player.js?v=0.1.31"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);
 document.getElementById('btn-next-frame').onclick = () => jumpToBoundary(1);

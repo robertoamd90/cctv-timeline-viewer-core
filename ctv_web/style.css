@@ -53,6 +53,11 @@ body {
 #language-select {
   width: auto; flex: 0 0 auto; padding: 5px 8px; font-size: 11px;
 }
+#database-warning {
+  flex-shrink: 0; padding: 7px 12px; border-bottom: 1px solid rgba(210,153,29,0.55);
+  background: rgba(210,153,29,0.14); color: #f2cc60; font-size: 11px;
+  line-height: 1.35; overflow-wrap: anywhere;
+}
 
 /* ═══ Views ═══ */
 .view { display: none !important; flex: 1; flex-direction: column; min-height: 0; }
@@ -369,6 +374,13 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
 #camera-filter-menu .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .form-actions { display: flex; gap: 6px; margin-top: 10px; }
 .form-actions button { flex: 1; }
+.range-index-status {
+  margin-top: 8px; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: 5px; color: var(--text-dim); font-size: 10px;
+  line-height: 1.35; overflow-wrap: anywhere;
+}
+.range-index-status.ready { color: var(--accent2); border-color: rgba(63,185,80,0.35); }
+.range-index-status.fallback { color: #f2cc60; border-color: rgba(210,153,29,0.55); }
 .stream-native-hint { margin-bottom: 10px; line-height: 1.4; }
 .stream-profile-fields {
   display: grid; grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1.2fr);
@@ -454,6 +466,7 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
 #toast.show { opacity: 1; transform: translateY(0); }
 #toast.error { background: var(--danger); color: #fff; }
 #toast.info { background: var(--accent2); color: #fff; }
+#toast.warning { background: #9e6a03; color: #fff; }
 
 @media (max-width: 760px), (max-width: 900px) and (max-height: 500px) {
   :root { --timeline-label-w: 84px; --timeline-h: 132px; }

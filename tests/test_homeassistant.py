@@ -16,7 +16,7 @@ from ctv_server.api.cameras import list_cameras, update_camera
 from ctv_server.api.events import _sanitize
 from ctv_server.api.recordings import _public_recording, list_recordings
 from ctv_server.api.search import search
-from ctv_server.api.system import list_source_directories, rebuild_index
+from ctv_server.api.system import list_source_directories, rebuild_index, session
 from ctv_server.api.timeline import get_timeline, get_timeline_bounds, prepare_timeline
 from ctv_server.auth import CurrentUser, require_admin, user_from_request
 from ctv_server.config import path_within_source_roots, source_roots
@@ -341,7 +341,7 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual((recordings, partitions), (0, 0))
             self.assertEqual(result["recordings_deleted"], 1)
             self.assertFalse(os.path.exists(thumbnail))
-            self.assertEqual(result["range_index"], "ready")
+            self.assertEqual(result["range_index"], {"status": "ready", "error": None})
 
     def test_rebuild_index_bypasses_a_broken_range_trigger(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -384,7 +384,7 @@ class PublicApiTests(unittest.TestCase):
             finally:
                 db.DB_PATH = original
             self.assertEqual(result["recordings_deleted"], 1)
-            self.assertEqual(result["range_index"], "ready")
+            self.assertEqual(result["range_index"], {"status": "ready", "error": None})
             self.assertEqual((recording_count, range_count), (1, 1))
 
     def test_startup_disables_range_hooks_when_write_probe_fails(self):
@@ -400,6 +400,9 @@ class PublicApiTests(unittest.TestCase):
                 conn = db.get_db()
                 state = conn.execute(
                     "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
+                ).fetchone()[0]
+                error = conn.execute(
+                    "SELECT value FROM schema_state WHERE key = 'recording_ranges_error'"
                 ).fetchone()[0]
                 triggers = conn.execute(
                     "SELECT COUNT(*) FROM sqlite_master "
@@ -417,7 +420,29 @@ class PublicApiTests(unittest.TestCase):
             finally:
                 db.DB_PATH = original
             self.assertEqual(state, "unavailable")
+            self.assertEqual(error, "unable to open database file")
             self.assertEqual(triggers, 0)
+
+    def test_session_exposes_range_fallback_diagnostic_only_to_admins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                with patch(
+                    "ctv_server.db._probe_recording_range_index",
+                    side_effect=sqlite3.OperationalError("unable to open database file"),
+                ):
+                    db.init_db()
+                admin = CurrentUser("admin", "admin", "Admin", True, True)
+                viewer = CurrentUser("viewer", "viewer", "Viewer", False, True)
+                admin_status = session(make_request(user=admin))["range_index"]
+                viewer_status = session(make_request(user=viewer))["range_index"]
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(admin_status, {
+                "status": "fallback", "error": "unable to open database file",
+            })
+            self.assertEqual(viewer_status, {"status": "fallback", "error": None})
 
     def test_rebuild_index_rejects_active_scan(self):
         self.assertTrue(begin_index_job())

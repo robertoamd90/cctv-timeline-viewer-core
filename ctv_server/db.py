@@ -95,19 +95,29 @@ def _range_bucket_sql(value: str, *, upper: bool) -> str:
     return f"({integer} {adjustment} ({scaled} {comparison} {integer}))"
 
 
-def _set_recording_range_state(conn: sqlite3.Connection, value: str):
+def _set_recording_range_state(
+    conn: sqlite3.Connection, value: str, error=None,
+):
     conn.execute(
         "INSERT OR REPLACE INTO schema_state (key, value) "
         "VALUES ('recording_ranges_ready', ?)",
         (value,),
     )
+    if error:
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_state (key, value) "
+            "VALUES ('recording_ranges_error', ?)",
+            (error,),
+        )
+    else:
+        conn.execute("DELETE FROM schema_state WHERE key = 'recording_ranges_error'")
 
 
-def disable_recording_range_index(conn: sqlite3.Connection):
+def disable_recording_range_index(conn: sqlite3.Connection, error=None):
     """Remove write hooks so a broken derived index cannot block core writes."""
     for trigger in _RANGE_TRIGGER_NAMES:
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-    _set_recording_range_state(conn, "unavailable")
+    _set_recording_range_state(conn, "unavailable", error)
 
 
 def sqlite_error_details(exc: sqlite3.Error) -> str:
@@ -115,6 +125,25 @@ def sqlite_error_details(exc: sqlite3.Error) -> str:
     code = getattr(exc, "sqlite_errorcode", None)
     suffix = f" ({name}/{code})" if name or code is not None else ""
     return f"{exc}{suffix}"
+
+
+def recording_range_status() -> dict:
+    conn = get_db()
+    try:
+        values = {
+            row["key"]: row["value"]
+            for row in conn.execute(
+                "SELECT key, value FROM schema_state "
+                "WHERE key IN ('recording_ranges_ready', 'recording_ranges_error')"
+            )
+        }
+    finally:
+        conn.close()
+    ready = values.get("recording_ranges_ready") == "1"
+    return {
+        "status": "ready" if ready else "fallback",
+        "error": None if ready else values.get("recording_ranges_error"),
+    }
 
 
 def _probe_recording_range_index(conn: sqlite3.Connection):
@@ -155,9 +184,10 @@ def _init_recording_range_index(conn: sqlite3.Connection) -> bool:
                 )
             """)
         except sqlite3.OperationalError as exc:
+            detail = sqlite_error_details(exc)
             if "no such module" not in str(exc).lower():
-                log.warning("Recording range index unavailable: %s", sqlite_error_details(exc))
-            disable_recording_range_index(conn)
+                log.warning("Recording range index unavailable: %s", detail)
+            disable_recording_range_index(conn, detail)
             return False
 
     start_value = "MIN(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
@@ -205,9 +235,11 @@ def _init_recording_range_index(conn: sqlite3.Connection) -> bool:
     try:
         _probe_recording_range_index(conn)
     except sqlite3.Error as exc:
-        log.warning("Recording range index write probe failed: %s", sqlite_error_details(exc))
-        disable_recording_range_index(conn)
+        detail = sqlite_error_details(exc)
+        log.warning("Recording range index write probe failed: %s", detail)
+        disable_recording_range_index(conn, detail)
         return False
+    _set_recording_range_state(conn, "1")
     return True
 
 
@@ -220,11 +252,12 @@ def reset_recording_range_index() -> bool:
         with write_db() as conn:
             return _init_recording_range_index(conn)
     except sqlite3.Error as exc:
-        log.warning("Recording range index reset failed: %s", sqlite_error_details(exc))
+        detail = sqlite_error_details(exc)
+        log.warning("Recording range index reset failed: %s", detail)
         # DROP can fail for a damaged virtual table.  Dropping the hooks in a
         # separate transaction still restores normal writes and SQL fallback.
         with write_db() as conn:
-            disable_recording_range_index(conn)
+            disable_recording_range_index(conn, detail)
         return False
 
 

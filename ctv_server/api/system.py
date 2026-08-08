@@ -10,6 +10,7 @@ from ctv_server.auth import CurrentUser, current_user, require_admin
 from ctv_server.config import deployment_mode, path_within_source_roots, source_roots
 from ctv_server.db import (
     disable_recording_range_index,
+    recording_range_status,
     reset_recording_range_index,
     sqlite_error_details,
     write_db,
@@ -75,7 +76,8 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                     "last_scan_started = NULL, last_scan_completed = NULL"
                 )
 
-            range_index_ready = reset_recording_range_index()
+            reset_recording_range_index()
+            range_index = recording_range_status()
 
             thumbnail_paths.update(str(path) for path in Path(THUMBNAIL_DIR).glob("*.jpg"))
             thumbnails = 0
@@ -102,13 +104,16 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
         "recordings_deleted": recordings,
         "partitions_deleted": partitions,
         "thumbnails_deleted": thumbnails,
-        "range_index": "ready" if range_index_ready else "fallback",
+        "range_index": range_index,
     }
 
 
 @router.get("/session")
 def session(request: Request):
     user = current_user(request)
+    range_index = recording_range_status()
+    if not user.is_admin:
+        range_index["error"] = None
     return {
         "deployment": deployment_mode(),
         "authenticated": True,
@@ -120,6 +125,7 @@ def session(request: Request):
         "is_admin": user.is_admin,
         "role_resolved": user.role_resolved,
         "source_roots": list(source_roots()) if user.is_admin else [],
+        "range_index": range_index,
     }
 
 

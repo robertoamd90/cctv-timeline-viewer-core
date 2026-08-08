@@ -12,7 +12,11 @@ assert(app.includes("timeOffset < 0 ? '-1' : '1'"));
 assert(app.includes('Math.abs(timeOffset)'));
 assert(app.includes("Number(document.getElementById('cam-offset-direction').value) * timeOffsetMagnitude"));
 assert(html.includes('id="btn-rebuild-index"'));
+assert(html.includes('id="database-warning"'));
+assert(html.includes('id="range-index-status"'));
 assert(app.includes("api('/api/admin/rebuild-index', { method: 'POST' })"));
 assert(app.includes('S.indexNeedsReload = true'));
+assert(app.includes("result.range_index?.status === 'fallback'"));
+assert(app.includes('renderRangeIndexStatus()'));
 
 console.log('Camera offset form tests passed');

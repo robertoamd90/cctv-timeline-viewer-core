@@ -716,14 +716,18 @@ function clockTick() {
     _tickId = requestAnimationFrame(clockTick);
     return;
   }
-  videos.forEach(video => {
-    if (video.parentElement.dataset.buffering === '1' && videoHasPlaybackBuffer(video)) {
+  const bufferStates = videos.map(video => ({
+    video,
+    ready: videoHasPlaybackBuffer(video),
+  }));
+  bufferStates.forEach(({ video, ready }) => {
+    if (video.parentElement.dataset.buffering === '1' && ready) {
       setPlayerStatus(video.parentElement, '');
     }
   });
-  const buffering = videos.some(video =>
+  const buffering = bufferStates.some(({ video, ready }) =>
     video.parentElement.dataset.buffering === '1' ||
-    (video.dataset.driftSeek !== '1' && !videoHasPlaybackBuffer(video))
+    (video.dataset.driftSeek !== '1' && !ready)
   );
   if (buffering) {
     if (!_wasBuffering) enterBufferingBarrier(null, null);
@@ -750,15 +754,18 @@ function clockTick() {
   }
 
   const previousTime = S.currentTime;
-  const videoTimes = videos.map(absoluteVideoTime).filter(Number.isFinite);
-  if (videoTimes.length) {
+  const timedVideos = videos
+    .map(video => ({ video, time: absoluteVideoTime(video) }))
+    .filter(item => Number.isFinite(item.time));
+  if (timedVideos.length) {
+    const videoTimes = timedVideos.map(item => item.time);
     const synchronizedTime = CtvMedia.medianTime(videoTimes);
     const maxSpread = S.speed >= 8 ? 0.5 : 0.25;
     const spread = Math.max(...videoTimes) - Math.min(...videoTimes);
     if (spread > maxSpread) {
-      const outlier = videos.reduce((worst, video) => {
-        const deviation = Math.abs(absoluteVideoTime(video) - synchronizedTime);
-        return !worst || deviation > worst.deviation ? { video, deviation } : worst;
+      const outlier = timedVideos.reduce((worst, item) => {
+        const deviation = Math.abs(item.time - synchronizedTime);
+        return !worst || deviation > worst.deviation ? { video: item.video, deviation } : worst;
       }, null).video;
       enterBufferingBarrier(outlier, t('player.buffering'));
       _tickId = requestAnimationFrame(clockTick);

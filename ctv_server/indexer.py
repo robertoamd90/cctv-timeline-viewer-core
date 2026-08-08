@@ -1,6 +1,7 @@
 import os
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import Callable, Optional
 
 from ctv_server.db import get_db, write_db
@@ -35,7 +36,7 @@ def index_camera(
             existing_params += (partition_key,)
         existing = {
             row["path"]: (row["size"], row["mtime"])
-            for row in conn.execute(existing_query, existing_params).fetchall()
+            for row in conn.execute(existing_query, existing_params)
         }
     finally:
         conn.close()
@@ -43,7 +44,7 @@ def index_camera(
     # Fallire qui significa sorgente offline: non cambiare l'indice esistente.
     files = scan_directory(source_path)
     scan_time = time.time()
-    seen_paths = {item["path"] for item in files}
+    scan_marker = f"scan:{time.time_ns()}:{threading.get_ident()}"
     counts = {"new": 0, "updated": 0, "missing": 0, "skipped": 0, "total": len(files)}
     skipped_paths = []
     prepared = []
@@ -73,29 +74,50 @@ def index_camera(
         return (
             camera_id, media["path"], media["filename"], start_ts, end_ts, duration,
             meta.get("codec", ""), meta.get("resolution", ""), meta.get("fps", 0),
-            media["size"], media["mtime"], file_hash, partition_key, media_kind, scan_time,
+            media["size"], media["mtime"], file_hash, partition_key, media_kind, scan_marker,
         )
 
     workers = max(1, int(os.environ.get("CTV_INDEX_WORKERS", "4")))
     done = counts["skipped"]
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(prepare_media, media): media for media in changed_media}
-        for future in as_completed(futures):
-            media = futures[future]
-            prepared.append(future.result())
-            counts["updated" if media["path"] in existing else "new"] += 1
-            done += 1
-            if progress:
-                progress(done, len(files))
+        media_iterator = iter(changed_media)
+        pending = {}
+
+        def submit_next() -> bool:
+            try:
+                media = next(media_iterator)
+            except StopIteration:
+                return False
+            pending[executor.submit(prepare_media, media)] = media
+            return True
+
+        for _ in range(min(len(changed_media), workers * 2)):
+            submit_next()
+        while pending:
+            completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                media = pending.pop(future)
+                prepared.append(future.result())
+                counts["updated" if media["path"] in existing else "new"] += 1
+                done += 1
+                if progress:
+                    progress(done, len(files))
+                submit_next()
 
     with write_db() as conn:
+        scope = "camera_id = ?"
+        scope_params: tuple = (camera_id,)
+        if partition_key is not None:
+            scope += " AND partition_key = ?"
+            scope_params += (partition_key,)
+        # A transaction-local marker distinguishes files seen by this scan.
+        # WAL readers keep seeing the previous committed last_seen values.
         conn.executemany(
             "UPDATE recordings SET availability = 'available', last_seen = ? "
             "WHERE camera_id = ? AND path = ?",
-            ((scan_time, camera_id, path) for path in skipped_paths),
+            ((scan_marker, camera_id, path) for path in skipped_paths),
         )
-        for values in prepared:
-            conn.execute("""
+        conn.executemany("""
                 INSERT INTO recordings (
                     camera_id, path, filename, start_ts, end_ts, duration,
                     codec, resolution, fps, size, mtime, hash, partition_key, media_kind,
@@ -109,36 +131,34 @@ def index_camera(
                     partition_key=excluded.partition_key,
                     media_kind=excluded.media_kind,
                     availability='available', last_seen=excluded.last_seen
-            """, values)
+            """, prepared)
 
-        available_query = (
-            "SELECT id, path, thumbnail_path FROM recordings "
-            "WHERE camera_id = ? AND availability = 'available'"
-        )
-        available_params: tuple = (camera_id,)
-        if partition_key is not None:
-            available_query += " AND partition_key = ?"
-            available_params += (partition_key,)
-        available_rows = conn.execute(available_query, available_params).fetchall()
-        missing_paths = [row["path"] for row in available_rows if row["path"] not in seen_paths]
-        missing_thumbnails = [
-            row["thumbnail_path"] for row in available_rows
-            if row["path"] in missing_paths and row["thumbnail_path"]
-        ]
+        missing_rows = conn.execute(
+            f"SELECT thumbnail_path FROM recordings WHERE {scope} "
+            "AND availability = 'available' AND last_seen IS NOT ?",
+            (*scope_params, scan_marker),
+        ).fetchall()
+        missing_thumbnails = [row["thumbnail_path"] for row in missing_rows if row["thumbnail_path"]]
         if purge_missing:
-            conn.executemany(
-                "DELETE FROM recordings WHERE camera_id = ? AND path = ?",
-                ((camera_id, path) for path in missing_paths),
+            conn.execute(
+                f"DELETE FROM recordings WHERE {scope} "
+                "AND availability = 'available' AND last_seen IS NOT ?",
+                (*scope_params, scan_marker),
             )
         else:
-            conn.executemany(
-                "UPDATE recordings SET availability = 'missing' WHERE camera_id = ? AND path = ?",
-                ((camera_id, path) for path in missing_paths),
+            conn.execute(
+                f"UPDATE recordings SET availability = 'missing' "
+                f"WHERE {scope} AND availability = 'available' AND last_seen IS NOT ?",
+                (*scope_params, scan_marker),
             )
-        counts["missing"] = len(missing_paths)
-        for thumbnail in missing_thumbnails:
-            try:
-                os.unlink(thumbnail)
-            except OSError:
-                pass
-        return counts
+        conn.execute(
+            f"UPDATE recordings SET last_seen = ? WHERE {scope} AND last_seen IS ?",
+            (scan_time, *scope_params, scan_marker),
+        )
+        counts["missing"] = len(missing_rows)
+    for thumbnail in missing_thumbnails:
+        try:
+            os.unlink(thumbnail)
+        except OSError:
+            pass
+    return counts

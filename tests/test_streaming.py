@@ -40,6 +40,13 @@ class StreamProfileTests(unittest.TestCase):
         self.assertEqual(profiles["balanced"]["scale_percent"], 50)
         self.assertEqual(profiles["fast"]["bitrate_kbps"], 450)
 
+    def test_profile_reads_are_cached_per_database(self):
+        with patch.object(streaming.db, "get_db", wraps=db.get_db) as get_db:
+            first = stream_profiles()
+            second = stream_profiles()
+        self.assertEqual(first, second)
+        self.assertEqual(get_db.call_count, 1)
+
     def test_admin_can_update_compressed_profiles(self):
         admin = CurrentUser("admin", "admin", "Admin", True, True)
         updated = update_stream_profiles(

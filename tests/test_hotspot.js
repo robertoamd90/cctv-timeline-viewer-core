@@ -19,4 +19,15 @@ assert.equal(hotspotCurrentCandidate(cameras, [1, 2, 3], 25), 2);
 assert.equal(hotspotCurrentCandidate(cameras, [1, 2, 3], 35), 3);
 assert.equal(hotspotCurrentCandidate(cameras, [1, 2, 3], 46), null);
 
+const overlappingCameras = [
+  { camera_id: 1, segments: [{ start_ts: 0, end_ts: 100 }] },
+  { camera_id: 2, segments: [{ start_ts: 20, end_ts: 30 }] },
+];
+assert.equal(hotspotCurrentCandidate(overlappingCameras, [1, 2], 25), 2);
+assert.equal(
+  hotspotCurrentCandidate(overlappingCameras, [1, 2], 35),
+  1,
+  'an earlier long recording remains a valid hotspot after an overlapping clip ends',
+);
+
 console.log('Auto Hotspot tests passed');

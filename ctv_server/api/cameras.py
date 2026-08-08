@@ -65,10 +65,11 @@ def list_cameras(request: Request) -> list[dict]:
     conn = get_db()
     rows = conn.execute("""
         SELECT c.*,
-            SUM(CASE WHEN r.availability = 'available' THEN 1 ELSE 0 END) AS recordings_available,
-            SUM(CASE WHEN r.availability = 'missing' THEN 1 ELSE 0 END) AS recordings_missing
-        FROM cameras c LEFT JOIN recordings r ON r.camera_id = c.id
-        GROUP BY c.id ORDER BY c.name
+            COALESCE(counts.recordings_available, 0) AS recordings_available,
+            COALESCE(counts.recordings_missing, 0) AS recordings_missing
+        FROM cameras c
+        LEFT JOIN camera_recording_counts counts ON counts.camera_id = c.id
+        ORDER BY c.name
     """).fetchall()
     conn.close()
     if user.is_admin:

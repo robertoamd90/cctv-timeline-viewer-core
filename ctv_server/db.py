@@ -6,9 +6,14 @@ from contextlib import contextmanager
 
 DB_PATH = os.environ.get("CTV_DB", os.path.expanduser("~/.ctv/ctv.db"))
 _WRITE_LOCK = threading.Lock()
+_ANCHOR_LOCK = threading.Lock()
+_ANCHOR_CONNECTION = None
 RECORDING_TIME_DELTA_SQL = (
     "COALESCE(c.time_offset_seconds, 0)"
 )
+# 128-second buckets cover the complete practical datetime range while exact
+# predicates keep the public interval semantics at sub-second precision.
+RANGE_BUCKET_SECONDS = 128
 
 
 def recording_time_delta(row) -> float:
@@ -18,18 +23,33 @@ def recording_time_delta(row) -> float:
 
 
 def get_db() -> sqlite3.Connection:
-    """Crea una nuova connessione al DB.
-    Imposta WAL mode solo se non già attivo (evita lock contention)."""
+    """Create a short-lived SQLite connection with per-connection settings."""
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    # Controlla se WAL è già attivo prima di settarlo
-    row = conn.execute("PRAGMA journal_mode").fetchone()
-    if row and row[0].lower() != "wal":
-        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+def _keep_wal_open(conn: sqlite3.Connection):
+    """Keep WAL shared state warm instead of recreating it for every request."""
+    global _ANCHOR_CONNECTION
+    with _ANCHOR_LOCK:
+        previous = _ANCHOR_CONNECTION
+        _ANCHOR_CONNECTION = conn
+    if previous is not None and previous is not conn:
+        previous.close()
+
+
+def close_db():
+    """Close process-wide SQLite state during application shutdown."""
+    global _ANCHOR_CONNECTION
+    with _ANCHOR_LOCK:
+        connection = _ANCHOR_CONNECTION
+        _ANCHOR_CONNECTION = None
+    if connection is not None:
+        connection.close()
 
 
 @contextmanager
@@ -59,9 +79,165 @@ def _add_columns(conn: sqlite3.Connection, table: str, definitions: Iterable[str
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
+def _range_bucket_sql(value: str, *, upper: bool) -> str:
+    """Return an outward-rounded integer bucket expression for an SQL value."""
+    scaled = f"(({value}) / {RANGE_BUCKET_SECONDS}.0)"
+    integer = f"CAST({scaled} AS INTEGER)"
+    comparison = ">" if upper else "<"
+    adjustment = "+" if upper else "-"
+    return f"({integer} {adjustment} ({scaled} {comparison} {integer}))"
+
+
+def _init_recording_range_index(conn: sqlite3.Connection):
+    """Create and maintain a compact interval index when SQLite R-Tree is available."""
+    ready = conn.execute(
+        "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
+    ).fetchone()
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recording_ranges'"
+    ).fetchone()
+    if not exists:
+        try:
+            conn.execute("""
+                CREATE VIRTUAL TABLE recording_ranges USING rtree_i32(
+                    recording_id,
+                    camera_id_min, camera_id_max,
+                    start_bucket, end_bucket
+                )
+            """)
+        except sqlite3.OperationalError as exc:
+            if "no such module" not in str(exc).lower():
+                raise
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_state (key, value) "
+                "VALUES ('recording_ranges_ready', 'unavailable')"
+            )
+            return
+
+    start_value = "MIN(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
+    end_value = "MAX(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
+    start_bucket = _range_bucket_sql(start_value, upper=False)
+    end_bucket = _range_bucket_sql(end_value, upper=True)
+    conn.executescript(f"""
+        CREATE TRIGGER IF NOT EXISTS recordings_range_insert
+        AFTER INSERT ON recordings
+        BEGIN
+            INSERT OR REPLACE INTO recording_ranges VALUES (
+                NEW.id, NEW.camera_id, NEW.camera_id, {start_bucket}, {end_bucket}
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS recordings_range_update
+        AFTER UPDATE OF camera_id, start_ts, end_ts ON recordings
+        BEGIN
+            DELETE FROM recording_ranges WHERE recording_id = OLD.id;
+            INSERT OR REPLACE INTO recording_ranges VALUES (
+                NEW.id, NEW.camera_id, NEW.camera_id, {start_bucket}, {end_bucket}
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS recordings_range_delete
+        AFTER DELETE ON recordings
+        BEGIN
+            DELETE FROM recording_ranges WHERE recording_id = OLD.id;
+        END;
+    """)
+    if not ready or ready["value"] != "1":
+        conn.execute("DELETE FROM recording_ranges")
+        source_start = _range_bucket_sql(
+            "MIN(start_ts, COALESCE(end_ts, start_ts))", upper=False,
+        )
+        source_end = _range_bucket_sql(
+            "MAX(start_ts, COALESCE(end_ts, start_ts))", upper=True,
+        )
+        conn.execute(f"""
+            INSERT INTO recording_ranges
+            SELECT id, camera_id, camera_id, {source_start}, {source_end}
+            FROM recordings
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_state (key, value) "
+            "VALUES ('recording_ranges_ready', '1')"
+        )
+
+
+def _init_recording_counts(conn: sqlite3.Connection):
+    """Maintain camera counters incrementally instead of grouping the full archive."""
+    conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS recordings_count_insert
+        AFTER INSERT ON recordings
+        BEGIN
+            INSERT INTO camera_recording_counts (
+                camera_id, recordings_available, recordings_missing
+            ) VALUES (
+                NEW.camera_id,
+                CASE WHEN NEW.availability = 'available' THEN 1 ELSE 0 END,
+                CASE WHEN NEW.availability = 'missing' THEN 1 ELSE 0 END
+            )
+            ON CONFLICT(camera_id) DO UPDATE SET
+                recordings_available = recordings_available + excluded.recordings_available,
+                recordings_missing = recordings_missing + excluded.recordings_missing;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS recordings_count_delete
+        AFTER DELETE ON recordings
+        BEGIN
+            UPDATE camera_recording_counts SET
+                recordings_available = MAX(0, recordings_available -
+                    CASE WHEN OLD.availability = 'available' THEN 1 ELSE 0 END),
+                recordings_missing = MAX(0, recordings_missing -
+                    CASE WHEN OLD.availability = 'missing' THEN 1 ELSE 0 END)
+            WHERE camera_id = OLD.camera_id;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS recordings_count_update
+        AFTER UPDATE OF camera_id, availability ON recordings
+        WHEN OLD.camera_id IS NOT NEW.camera_id OR OLD.availability IS NOT NEW.availability
+        BEGIN
+            UPDATE camera_recording_counts SET
+                recordings_available = MAX(0, recordings_available -
+                    CASE WHEN OLD.availability = 'available' THEN 1 ELSE 0 END),
+                recordings_missing = MAX(0, recordings_missing -
+                    CASE WHEN OLD.availability = 'missing' THEN 1 ELSE 0 END)
+            WHERE camera_id = OLD.camera_id;
+            INSERT INTO camera_recording_counts (
+                camera_id, recordings_available, recordings_missing
+            ) VALUES (
+                NEW.camera_id,
+                CASE WHEN NEW.availability = 'available' THEN 1 ELSE 0 END,
+                CASE WHEN NEW.availability = 'missing' THEN 1 ELSE 0 END
+            )
+            ON CONFLICT(camera_id) DO UPDATE SET
+                recordings_available = recordings_available + excluded.recordings_available,
+                recordings_missing = recordings_missing + excluded.recordings_missing;
+        END;
+    """)
+    ready = conn.execute(
+        "SELECT value FROM schema_state WHERE key = 'recording_counts_ready'"
+    ).fetchone()
+    if not ready or ready["value"] != "1":
+        conn.execute("DELETE FROM camera_recording_counts")
+        conn.execute("""
+            INSERT INTO camera_recording_counts (
+                camera_id, recordings_available, recordings_missing
+            )
+            SELECT camera_id,
+                   SUM(CASE WHEN availability = 'available' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN availability = 'missing' THEN 1 ELSE 0 END)
+            FROM recordings GROUP BY camera_id
+        """)
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_state (key, value) "
+            "VALUES ('recording_counts_ready', '1')"
+        )
+
+
 def init_db():
     """Inizializza schema DB (idempotente)."""
     conn = get_db()
+    # WAL is persistent database state. Setting it once at startup avoids a
+    # filesystem lock and journal probe on every request connection.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS cameras (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +280,8 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_recordings_camera ON recordings(camera_id);
         CREATE INDEX IF NOT EXISTS idx_recordings_start ON recordings(start_ts);
         CREATE INDEX IF NOT EXISTS idx_recordings_range ON recordings(camera_id, start_ts, end_ts);
+        CREATE INDEX IF NOT EXISTS idx_recordings_end
+            ON recordings(camera_id, COALESCE(end_ts, start_ts) DESC);
 
         CREATE TABLE IF NOT EXISTS partitions (
             camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
@@ -125,6 +303,17 @@ def init_db():
             scale_percent INTEGER NOT NULL,
             fps INTEGER NOT NULL,
             bitrate_kbps INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS camera_recording_counts (
+            camera_id INTEGER PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
+            recordings_available INTEGER NOT NULL DEFAULT 0,
+            recordings_missing INTEGER NOT NULL DEFAULT 0
         );
     """)
     conn.executemany(
@@ -186,8 +375,10 @@ def init_db():
         WHERE partition_key IS NULL
           AND camera_id IN (SELECT id FROM cameras WHERE indexing_mode = 'partitioned')
     """)
+    _init_recording_range_index(conn)
+    _init_recording_counts(conn)
     conn.commit()
-    conn.close()
+    _keep_wal_open(conn)
     for thumbnail in legacy_thumbnails:
         try:
             os.unlink(thumbnail)

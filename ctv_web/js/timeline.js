@@ -4,6 +4,7 @@
 
 const MIN_ZOOM_RANGE = 3;
 let _timelineLabelWidthCache = null;
+let _overviewBaseCache = { timeline: null, width: 0, canvas: null, surface: '' };
 
 function timeToX(ts, vFrom, vTo, width) {
   return ((ts - vFrom) / ((vTo - vFrom) || 1)) * width;
@@ -76,8 +77,6 @@ function renderRuler(vFrom, vTo, width) {
 
 function renderOverview(vFrom, vTo, width) {
   const overview = document.getElementById('overview');
-  const style = getComputedStyle(document.documentElement);
-  const surface2 = style.getPropertyValue('--surface2').trim() || '#1c2333';
 
   let canvas = overview.querySelector('canvas');
   if (!canvas) {
@@ -97,22 +96,33 @@ function renderOverview(vFrom, vTo, width) {
     playhead.id = 'overview-playhead';
     overview.appendChild(playhead);
   }
-  canvas.width = overview.clientWidth || 800;
-  canvas.height = 32;
+  const canvasWidth = overview.clientWidth || 800;
+  const canvasHeight = 32;
+  if (canvas.width !== canvasWidth) canvas.width = canvasWidth;
+  if (canvas.height !== canvasHeight) canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d');
   const totalRange = (S.timeline.to - S.timeline.from) || 1;
 
-  ctx.fillStyle = surface2;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  S.timeline.cameras.forEach(cam => {
-    ctx.fillStyle = camColor(cam.camera_id);
-    cam.segments.forEach(s => {
-      const x = ((s.start_ts - S.timeline.from) / totalRange) * canvas.width;
-      const w = Math.max(1.5, ((s.duration || 1) / totalRange) * canvas.width);
-      ctx.fillRect(x, 5, w, canvas.height - 10);
+  if (_overviewBaseCache.timeline !== S.timeline || _overviewBaseCache.width !== canvasWidth) {
+    const style = getComputedStyle(document.documentElement);
+    const surface = style.getPropertyValue('--surface2').trim() || '#1c2333';
+    const base = document.createElement('canvas');
+    base.width = canvasWidth;
+    base.height = canvasHeight;
+    const baseContext = base.getContext('2d');
+    baseContext.fillStyle = surface;
+    baseContext.fillRect(0, 0, base.width, base.height);
+    S.timeline.cameras.forEach(cam => {
+      baseContext.fillStyle = camColor(cam.camera_id);
+      cam.segments.forEach(s => {
+        const x = ((s.start_ts - S.timeline.from) / totalRange) * base.width;
+        const w = Math.max(1.5, ((s.duration || 1) / totalRange) * base.width);
+        baseContext.fillRect(x, 5, w, base.height - 10);
+      });
     });
-  });
+    _overviewBaseCache = { timeline: S.timeline, width: canvasWidth, canvas: base, surface };
+  }
+  ctx.drawImage(_overviewBaseCache.canvas, 0, 0);
 
   const vpLeft = ((vFrom - S.timeline.from) / totalRange) * canvas.width;
   const vpRight = ((vTo - S.timeline.from) / totalRange) * canvas.width;
@@ -132,8 +142,7 @@ function renderRows(vFrom, vTo, segW, rW) {
   let html = '';
   S.timeline.cameras.forEach(cam => {
     const color = camColor(cam.camera_id);
-    const segs = cam.segments
-      .filter(s => (s.end_ts || s.start_ts) >= vFrom && s.start_ts <= vTo)
+    const segs = CtvMedia.overlappingSegments(cam.segments, vFrom, vTo)
       .map(s => {
         const left = timeToX(s.start_ts, vFrom, vTo, segW);
         const w = s.end_ts ? timeToX(s.end_ts, vFrom, vTo, segW) - left : 3;
@@ -141,7 +150,7 @@ function renderRows(vFrom, vTo, segW, rW) {
         const dur = s.duration || 0;
         let thumbHtml = '';
         if (s.has_thumbnail && spx > 50) {
-          thumbHtml = `<img class="seg-thumb" src="${escAttr(appUrl(`/api/recordings/${s.id}/thumbnail`))}">`;
+          thumbHtml = `<img class="seg-thumb" loading="lazy" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.id}/thumbnail`))}">`;
         }
         return `<div class="timeline-seg" style="left:${left}px;width:${spx}px;background:${color};"
           data-recording-id="${s.id}" data-start="${s.start_ts}" data-end="${s.end_ts||''}"
@@ -173,12 +182,6 @@ function renderRows(vFrom, vTo, segW, rW) {
       <div class="timeline-row-segments">${segs}${stateHtml}</div></div>`;
   });
   body.innerHTML = html;
-
-  body.querySelectorAll('.timeline-seg').forEach(seg => {
-    seg.addEventListener('mouseenter', showSegTooltip);
-    seg.addEventListener('mouseleave', hideTooltip);
-    seg.addEventListener('mousemove', moveSegTooltip);
-  });
 }
 
 // ── Tooltip ──
@@ -189,18 +192,33 @@ function hideTooltip() { if (_ttEl) { _ttEl.style.display = 'none'; _ttEl.innerH
 // Nascondi tooltip su scroll e quando il mouse esce dall'area timeline
 (function() {
   const s = document.getElementById('timeline-scroll');
+  const body = document.getElementById('timeline-body');
   s.addEventListener('scroll', hideTooltip);
   s.addEventListener('mouseleave', hideTooltip);
   // Anche wheel sullo scroll container chiude il tooltip
   s.addEventListener('wheel', () => setTimeout(hideTooltip, 50));
+  body.addEventListener('mouseover', event => {
+    const segment = event.target.closest('.timeline-seg');
+    const related = event.relatedTarget;
+    if (!segment || (related instanceof Node && segment.contains(related))) return;
+    showSegTooltip(event, segment);
+  });
+  body.addEventListener('mouseout', event => {
+    const segment = event.target.closest('.timeline-seg');
+    const related = event.relatedTarget;
+    if (segment && !(related instanceof Node && segment.contains(related))) hideTooltip();
+  });
+  body.addEventListener('mousemove', event => {
+    if (event.target.closest('.timeline-seg')) moveSegTooltip(event);
+  });
 })();
 
-function showSegTooltip(e) {
+function showSegTooltip(e, segment = e.currentTarget) {
   clearTimeout(_ttHideTimer);
   if (!_ttEl) { _ttEl = document.createElement('div'); _ttEl.className = 'seg-tooltip'; document.body.appendChild(_ttEl); }
-  const s = e.currentTarget;
+  const s = segment;
   let h = '';
-  if (s.dataset.thumb === '1') h += `<img class="tt-thumb" src="${escAttr(appUrl(`/api/recordings/${s.dataset.recordingId}/thumbnail`))}">`;
+  if (s.dataset.thumb === '1') h += `<img class="tt-thumb" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.dataset.recordingId}/thumbnail`))}">`;
   h += `<div style="padding:8px 12px">`;
   h += `<div class="tt-name">${esc(s.dataset.camera)} &middot; ${esc(s.dataset.filename)}</div>`;
   const st = parseFloat(s.dataset.start), en = s.dataset.end ? parseFloat(s.dataset.end) : null;
@@ -421,7 +439,7 @@ document.getElementById('timeline-scroll').addEventListener('wheel', e => {
   if (nf < S.timeline.from) { nt += S.timeline.from - nf; nf = S.timeline.from; }
   if (nt > S.timeline.to) { nf -= nt - S.timeline.to; nt = S.timeline.to; }
   if (nf < S.timeline.from) nf = S.timeline.from;
-  S.zoomRange = [nf, nt]; renderTimeline();
+  S.zoomRange = [nf, nt]; queuePanRender();
 }, { passive: false });
 
 // ── Click seek ──

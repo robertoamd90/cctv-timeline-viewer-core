@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from ctv_server.db import RECORDING_TIME_DELTA_SQL, get_db, recording_time_delta
+from ctv_server.db import RANGE_BUCKET_SECONDS, get_db
 from ctv_server.partition_service import prepare_partitions, run_partition_scan
 from ctv_server.partitioner import dates_for_range, partition_key
 
@@ -36,18 +36,42 @@ def prepare_timeline(
     return {"status": "queued", "partitions": len(jobs)}
 
 
+def _timeline_bounds(conn) -> tuple:
+    cameras = conn.execute(
+        "SELECT id, indexing_mode, time_offset_seconds FROM cameras"
+    ).fetchall()
+    first = None
+    last = None
+    for camera in cameras:
+        partition_clause = (
+            "" if camera["indexing_mode"] == "full" else " AND partition_key IS NOT NULL"
+        )
+        earliest = conn.execute(f"""
+            SELECT start_ts FROM recordings
+            WHERE camera_id = ? AND availability = 'available' {partition_clause}
+            ORDER BY start_ts LIMIT 1
+        """, (camera["id"],)).fetchone()
+        latest = conn.execute(f"""
+            SELECT COALESCE(end_ts, start_ts) AS end_ts FROM recordings
+            WHERE camera_id = ? AND availability = 'available' {partition_clause}
+            ORDER BY COALESCE(end_ts, start_ts) DESC LIMIT 1
+        """, (camera["id"],)).fetchone()
+        offset = camera["time_offset_seconds"] or 0
+        if earliest:
+            candidate = earliest["start_ts"] + offset
+            first = candidate if first is None else min(first, candidate)
+        if latest:
+            candidate = latest["end_ts"] + offset
+            last = candidate if last is None else max(last, candidate)
+    return first, last
+
+
 @router.get("/bounds")
 def get_timeline_bounds():
     conn = get_db()
-    row = conn.execute(
-        f"SELECT MIN(r.start_ts + {RECORDING_TIME_DELTA_SQL}) AS first, "
-        f"MAX(COALESCE(r.end_ts, r.start_ts) + {RECORDING_TIME_DELTA_SQL}) AS last "
-        "FROM recordings r JOIN cameras c ON c.id = r.camera_id "
-        "WHERE r.availability = 'available' "
-        "AND (c.indexing_mode = 'full' OR r.partition_key IS NOT NULL)"
-    ).fetchone()
+    first, last = _timeline_bounds(conn)
     conn.close()
-    return {"first": row["first"], "last": row["last"]}
+    return {"first": first, "last": last}
 
 
 @router.get("")
@@ -61,17 +85,11 @@ def get_timeline(
 
     # Se nessun range specificato, usa i limiti dei dati
     if from_ts is None or to_ts is None:
-        row = conn.execute(f"""
-            SELECT MIN(r.start_ts + {RECORDING_TIME_DELTA_SQL}) as mn,
-                   MAX(COALESCE(r.end_ts, r.start_ts) + {RECORDING_TIME_DELTA_SQL}) as mx
-            FROM recordings r JOIN cameras c ON c.id = r.camera_id
-            WHERE r.availability = 'available'
-              AND (c.indexing_mode = 'full' OR r.partition_key IS NOT NULL)
-        """).fetchone()
+        first, last = _timeline_bounds(conn)
         if from_ts is None:
-            from_ts = row["mn"] or 0
+            from_ts = first or 0
         if to_ts is None:
-            to_ts = row["mx"] or (from_ts + 86400)
+            to_ts = last or (from_ts + 86400)
 
     selected_ids = _camera_ids(camera_ids)
     camera_query = "SELECT * FROM cameras"
@@ -118,38 +136,73 @@ def get_timeline(
             "segments": [],
         }
 
-    query = f"""SELECT r.*, c.name as camera_name, c.time_offset_seconds
-               FROM recordings r JOIN cameras c ON r.camera_id = c.id
-               WHERE r.availability = 'available'
-                 AND (c.indexing_mode = 'full' OR r.partition_key IS NOT NULL)
-                 AND COALESCE(r.end_ts, r.start_ts) + {RECORDING_TIME_DELTA_SQL} >= ?
-                 AND r.start_ts + {RECORDING_TIME_DELTA_SQL} <= ?"""
-    params: list = [from_ts, to_ts]
+    range_state = conn.execute(
+        "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
+    ).fetchone()
+    use_range_index = bool(range_state and range_state["value"] == "1")
+    columns = (
+        "r.id, r.camera_id, r.filename, r.start_ts, r.end_ts, "
+        "r.duration, r.media_kind, r.thumbnail_path"
+    )
 
-    if selected_ids:
-        placeholders = ",".join("?" * len(selected_ids))
-        query += f" AND r.camera_id IN ({placeholders})"
-        params.extend(selected_ids)
+    # Camera offsets differ, so querying each camera in its physical time range
+    # avoids an expression over every row.  The R-Tree returns only intervals
+    # intersecting the requested window; exact predicates below remove the
+    # intentionally coarse integer buckets.
+    for camera in selected_cameras:
+        camera_id = camera["id"]
+        offset = camera["time_offset_seconds"] or 0
+        physical_from = from_ts - offset
+        physical_to = to_ts - offset
+        partition_clause = (
+            "" if camera["indexing_mode"] == "full" else " AND r.partition_key IS NOT NULL"
+        )
+        if use_range_index:
+            query = f"""
+                SELECT {columns}
+                FROM recording_ranges ranges
+                JOIN recordings r ON r.id = ranges.recording_id
+                WHERE ranges.camera_id_min <= ? AND ranges.camera_id_max >= ?
+                  AND ranges.start_bucket <= ? AND ranges.end_bucket >= ?
+                  AND r.camera_id = ? AND r.availability = 'available'
+                  {partition_clause}
+                  AND COALESCE(r.end_ts, r.start_ts) + ? >= ?
+                  AND r.start_ts + ? <= ?
+                ORDER BY r.start_ts
+            """
+            rows = conn.execute(query, (
+                camera_id,
+                camera_id,
+                math.ceil(physical_to / RANGE_BUCKET_SECONDS),
+                math.floor(physical_from / RANGE_BUCKET_SECONDS),
+                camera_id,
+                offset,
+                from_ts,
+                offset,
+                to_ts,
+            )).fetchall()
+        else:
+            rows = conn.execute(f"""
+                SELECT {columns}
+                FROM recordings r
+                WHERE r.camera_id = ? AND r.availability = 'available'
+                  {partition_clause}
+                  AND COALESCE(r.end_ts, r.start_ts) + ? >= ?
+                  AND r.start_ts + ? <= ?
+                ORDER BY r.start_ts
+            """, (camera_id, offset, from_ts, offset, to_ts)).fetchall()
 
-    query += " ORDER BY c.name, r.start_ts"
-    rows = conn.execute(query, params).fetchall()
-
-    # Aggiunge i segmenti alle righe camera gia create.
-    for r in rows:
-        d = dict(r)
-        cid = d["camera_id"]
-        if cid not in cameras_map:
-            continue
-        offset = recording_time_delta(r)
-        cameras_map[cid]["segments"].append({
-            "id": d["id"],
-            "filename": d["filename"],
-            "start_ts": d["start_ts"] + offset,
-            "end_ts": d["end_ts"] + offset if d["end_ts"] is not None else None,
-            "duration": d["duration"],
-            "media_kind": d["media_kind"],
-            "has_thumbnail": d["thumbnail_path"] is not None,
-        })
+        segments = cameras_map[camera_id]["segments"]
+        for row in rows:
+            segments.append({
+                "id": row["id"],
+                "filename": row["filename"],
+                "start_ts": row["start_ts"] + offset,
+                "end_ts": row["end_ts"] + offset if row["end_ts"] is not None else None,
+                "duration": row["duration"],
+                "media_kind": row["media_kind"],
+                "has_thumbnail": row["thumbnail_path"] is not None,
+            })
 
     conn.close()
     return {

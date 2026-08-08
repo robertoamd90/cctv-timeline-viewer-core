@@ -1,4 +1,6 @@
 import os
+import logging
+import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -6,13 +8,19 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from ctv_server.auth import CurrentUser, current_user, require_admin
 from ctv_server.config import deployment_mode, path_within_source_roots, source_roots
-from ctv_server.db import write_db
+from ctv_server.db import (
+    disable_recording_range_index,
+    reset_recording_range_index,
+    sqlite_error_details,
+    write_db,
+)
 from ctv_server.models import StreamProfilesUpdate
 from ctv_server.operations import IndexBusyError, maintenance_window
 from ctv_server.streaming import get_stream_profiles, invalidate_stream_profiles
 from ctv_server.thumbnailer import THUMBNAIL_DIR
 
 router = APIRouter(prefix="/api", tags=["system"])
+log = logging.getLogger("ctv.system")
 
 
 @router.get("/stream-profiles")
@@ -46,6 +54,8 @@ def update_stream_profiles(
 def rebuild_index(_: CurrentUser = Depends(require_admin)):
     try:
         with maintenance_window():
+            # The interval index is derived data.  Disable its hooks first so
+            # corruption in that index can never prevent the recovery action.
             with write_db() as conn:
                 recordings = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
                 partitions = conn.execute("SELECT COUNT(*) FROM partitions").fetchone()[0]
@@ -54,12 +64,18 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                         "SELECT thumbnail_path FROM recordings WHERE thumbnail_path IS NOT NULL"
                     ).fetchall()
                 }
+                disable_recording_range_index(conn)
+
+            with write_db() as conn:
                 conn.execute("DELETE FROM recordings")
                 conn.execute("DELETE FROM partitions")
+                conn.execute("DELETE FROM camera_recording_counts")
                 conn.execute(
                     "UPDATE cameras SET source_status = 'unknown', source_error = NULL, "
                     "last_scan_started = NULL, last_scan_completed = NULL"
                 )
+
+            range_index_ready = reset_recording_range_index()
 
             thumbnail_paths.update(str(path) for path in Path(THUMBNAIL_DIR).glob("*.jpg"))
             thumbnails = 0
@@ -73,12 +89,20 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                     pass
     except IndexBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        detail = sqlite_error_details(exc)
+        log.exception("Database rebuild failed: %s", detail)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database write failed during rebuild: {detail}",
+        ) from exc
 
     return {
         "status": "rebuilt",
         "recordings_deleted": recordings,
         "partitions_deleted": partitions,
         "thumbnails_deleted": thumbnails,
+        "range_index": "ready" if range_index_ready else "fallback",
     }
 
 

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -340,6 +341,83 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual((recordings, partitions), (0, 0))
             self.assertEqual(result["recordings_deleted"], 1)
             self.assertFalse(os.path.exists(thumbnail))
+            self.assertEqual(result["range_index"], "ready")
+
+    def test_rebuild_index_bypasses_a_broken_range_trigger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                db.init_db()
+                conn = db.get_db()
+                camera_id = conn.execute(
+                    "INSERT INTO cameras (name, source_path, indexing_mode) "
+                    "VALUES ('Garage', ?, 'full')", (tmp,),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO recordings (camera_id, path, filename, start_ts) "
+                    "VALUES (?, 'clip.mp4', 'clip.mp4', 100)", (camera_id,),
+                )
+                conn.execute("DROP TRIGGER recordings_range_delete")
+                conn.execute("""
+                    CREATE TRIGGER recordings_range_delete
+                    BEFORE DELETE ON recordings
+                    BEGIN
+                        SELECT RAISE(ABORT, 'derived range index is broken');
+                    END
+                """)
+                conn.commit()
+                conn.close()
+
+                admin = CurrentUser("admin", "admin", "Admin", True, True)
+                result = rebuild_index(admin)
+
+                conn = db.get_db()
+                conn.execute(
+                    "INSERT INTO recordings (camera_id, path, filename, start_ts) "
+                    "VALUES (?, 'new.mp4', 'new.mp4', 200)", (camera_id,),
+                )
+                conn.commit()
+                recording_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+                range_count = conn.execute("SELECT COUNT(*) FROM recording_ranges").fetchone()[0]
+                conn.close()
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(result["recordings_deleted"], 1)
+            self.assertEqual(result["range_index"], "ready")
+            self.assertEqual((recording_count, range_count), (1, 1))
+
+    def test_startup_disables_range_hooks_when_write_probe_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                with patch(
+                    "ctv_server.db._probe_recording_range_index",
+                    side_effect=sqlite3.OperationalError("unable to open database file"),
+                ):
+                    db.init_db()
+                conn = db.get_db()
+                state = conn.execute(
+                    "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
+                ).fetchone()[0]
+                triggers = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE 'recordings_range_%'"
+                ).fetchone()[0]
+                camera_id = conn.execute(
+                    "INSERT INTO cameras (name, source_path) VALUES ('Garage', ?)", (tmp,),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO recordings (camera_id, path, filename, start_ts) "
+                    "VALUES (?, 'clip.mp4', 'clip.mp4', 100)", (camera_id,),
+                )
+                conn.commit()
+                conn.close()
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(state, "unavailable")
+            self.assertEqual(triggers, 0)
 
     def test_rebuild_index_rejects_active_scan(self):
         self.assertTrue(begin_index_job())

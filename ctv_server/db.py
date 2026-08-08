@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import threading
+import logging
 from collections.abc import Iterable
 from contextlib import contextmanager
 
@@ -8,12 +9,18 @@ DB_PATH = os.environ.get("CTV_DB", os.path.expanduser("~/.ctv/ctv.db"))
 _WRITE_LOCK = threading.Lock()
 _ANCHOR_LOCK = threading.Lock()
 _ANCHOR_CONNECTION = None
+log = logging.getLogger("ctv.db")
 RECORDING_TIME_DELTA_SQL = (
     "COALESCE(c.time_offset_seconds, 0)"
 )
 # 128-second buckets cover the complete practical datetime range while exact
 # predicates keep the public interval semantics at sub-second precision.
 RANGE_BUCKET_SECONDS = 128
+_RANGE_TRIGGER_NAMES = (
+    "recordings_range_insert",
+    "recordings_range_update",
+    "recordings_range_delete",
+)
 
 
 def recording_time_delta(row) -> float:
@@ -88,8 +95,50 @@ def _range_bucket_sql(value: str, *, upper: bool) -> str:
     return f"({integer} {adjustment} ({scaled} {comparison} {integer}))"
 
 
-def _init_recording_range_index(conn: sqlite3.Connection):
-    """Create and maintain a compact interval index when SQLite R-Tree is available."""
+def _set_recording_range_state(conn: sqlite3.Connection, value: str):
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_state (key, value) "
+        "VALUES ('recording_ranges_ready', ?)",
+        (value,),
+    )
+
+
+def disable_recording_range_index(conn: sqlite3.Connection):
+    """Remove write hooks so a broken derived index cannot block core writes."""
+    for trigger in _RANGE_TRIGGER_NAMES:
+        conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+    _set_recording_range_state(conn, "unavailable")
+
+
+def sqlite_error_details(exc: sqlite3.Error) -> str:
+    name = getattr(exc, "sqlite_errorname", None)
+    code = getattr(exc, "sqlite_errorcode", None)
+    suffix = f" ({name}/{code})" if name or code is not None else ""
+    return f"{exc}{suffix}"
+
+
+def _probe_recording_range_index(conn: sqlite3.Connection):
+    """Exercise an R-Tree write and roll it back without changing derived data."""
+    conn.execute("SAVEPOINT recording_ranges_probe")
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO recording_ranges VALUES (?, 0, 0, 0, 0)",
+            (-2_147_483_648,),
+        )
+        conn.execute(
+            "DELETE FROM recording_ranges WHERE recording_id = ?",
+            (-2_147_483_648,),
+        )
+    except sqlite3.Error:
+        conn.execute("ROLLBACK TO recording_ranges_probe")
+        conn.execute("RELEASE recording_ranges_probe")
+        raise
+    conn.execute("ROLLBACK TO recording_ranges_probe")
+    conn.execute("RELEASE recording_ranges_probe")
+
+
+def _init_recording_range_index(conn: sqlite3.Connection) -> bool:
+    """Create a derived interval index, falling back safely if it is unusable."""
     ready = conn.execute(
         "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
     ).fetchone()
@@ -107,12 +156,9 @@ def _init_recording_range_index(conn: sqlite3.Connection):
             """)
         except sqlite3.OperationalError as exc:
             if "no such module" not in str(exc).lower():
-                raise
-            conn.execute(
-                "INSERT OR REPLACE INTO schema_state (key, value) "
-                "VALUES ('recording_ranges_ready', 'unavailable')"
-            )
-            return
+                log.warning("Recording range index unavailable: %s", sqlite_error_details(exc))
+            disable_recording_range_index(conn)
+            return False
 
     start_value = "MIN(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
     end_value = "MAX(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
@@ -155,10 +201,31 @@ def _init_recording_range_index(conn: sqlite3.Connection):
             SELECT id, camera_id, camera_id, {source_start}, {source_end}
             FROM recordings
         """)
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_state (key, value) "
-            "VALUES ('recording_ranges_ready', '1')"
-        )
+        _set_recording_range_state(conn, "1")
+    try:
+        _probe_recording_range_index(conn)
+    except sqlite3.Error as exc:
+        log.warning("Recording range index write probe failed: %s", sqlite_error_details(exc))
+        disable_recording_range_index(conn)
+        return False
+    return True
+
+
+def reset_recording_range_index() -> bool:
+    """Replace the disposable R-Tree without making core data depend on success."""
+    try:
+        with write_db() as conn:
+            disable_recording_range_index(conn)
+            conn.execute("DROP TABLE IF EXISTS recording_ranges")
+        with write_db() as conn:
+            return _init_recording_range_index(conn)
+    except sqlite3.Error as exc:
+        log.warning("Recording range index reset failed: %s", sqlite_error_details(exc))
+        # DROP can fail for a damaged virtual table.  Dropping the hooks in a
+        # separate transaction still restores normal writes and SQL fallback.
+        with write_db() as conn:
+            disable_recording_range_index(conn)
+        return False
 
 
 def _init_recording_counts(conn: sqlite3.Connection):

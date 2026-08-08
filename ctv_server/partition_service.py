@@ -1,5 +1,6 @@
 import logging
 import os
+import sqlite3
 import threading
 import time
 from datetime import datetime
@@ -7,7 +8,7 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from ctv_server.api.events import emit
-from ctv_server.db import get_db, write_db
+from ctv_server.db import get_db, sqlite_error_details, write_db
 from ctv_server.indexer import index_camera
 from ctv_server.operations import begin_index_job, end_index_job, index_generation
 from ctv_server.partitioner import dates_for_range, partition_key, resolve_partition
@@ -174,7 +175,7 @@ def run_partition_scan(
         ).start()
         return payload
     except Exception as exc:
-        message = str(exc)
+        message = sqlite_error_details(exc) if isinstance(exc, sqlite3.Error) else str(exc)
         log.warning("Partition scan failed for camera %d, %s: %s", camera_id, key, message)
         with write_db() as conn:
             conn.execute(

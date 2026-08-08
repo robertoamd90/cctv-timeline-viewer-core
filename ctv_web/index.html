@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=0.1.21">
+<link rel="stylesheet" href="style.css?v=0.1.27">
 </head>
 <body>
 
@@ -21,6 +21,7 @@
   </select>
   <div id="topbar-status" data-i18n="status.ready">Ready</div>
 </header>
+<div id="database-warning" role="alert" hidden></div>
 
 <!-- ═══ Vista Timeline ═══ -->
 <div id="view-timeline" class="view active">
@@ -179,6 +180,7 @@
         <button id="btn-scan-all" data-i18n="cameras.scanAll">Scan all cameras</button>
         <button id="btn-search-open" class="secondary" style="margin-top:6px;" data-i18n="cameras.searchRecordings">Search recordings...</button>
         <button id="btn-rebuild-index" class="danger" style="margin-top:6px;" data-i18n="cameras.rebuildIndex">Rebuild index</button>
+        <div id="range-index-status" class="range-index-status"></div>
       </section>
       <section id="stream-profile-settings">
         <h3 data-i18n="streaming.settings">Streaming profiles</h3>
@@ -255,10 +257,10 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=0.1.20"></script>
+<script src="js/i18n.js?v=0.1.27"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
-<script src="js/app.js?v=0.1.20"></script>
+<script src="js/app.js?v=0.1.27"></script>
 <script src="js/timeline.js?v=0.1.20"></script>
 <script src="js/media.js?v=0.1.28"></script>
 <script src="js/player.js?v=0.1.33"></script>

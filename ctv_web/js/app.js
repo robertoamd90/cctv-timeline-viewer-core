@@ -154,6 +154,21 @@ function toast(msg, type) {
   _toastTimer = setTimeout(() => { el.className = ''; }, 3000);
 }
 
+function renderRangeIndexStatus() {
+  const rangeIndex = S.session.range_index || {status: 'fallback', error: null};
+  const ready = rangeIndex.status === 'ready';
+  const error = rangeIndex.error || t('cameras.rangeIndexUnknownError');
+  const status = document.getElementById('range-index-status');
+  status.className = `range-index-status ${ready ? 'ready' : 'fallback'}`;
+  status.textContent = ready
+    ? t('cameras.rangeIndexReady')
+    : t('cameras.rangeIndexFallbackStatus', {message: error});
+
+  const warning = document.getElementById('database-warning');
+  warning.hidden = ready;
+  warning.textContent = ready ? '' : t('cameras.rangeIndexFallbackWarning', {message: error});
+}
+
 // ═══ Tab switching ═══
 function switchTab(name) {
   if (S.activeTab === name) return;
@@ -229,6 +244,7 @@ async function loadSession() {
   document.getElementById('btn-browse-source').hidden = !isAdmin || !S.session.source_roots?.length;
   const pathInput = document.getElementById('cam-path');
   pathInput.readOnly = S.session.deployment === 'homeassistant';
+  renderRangeIndexStatus();
   if (!isAdmin && S.activeTab === 'cameras') switchTab('timeline');
 }
 
@@ -1148,7 +1164,16 @@ document.getElementById('btn-rebuild-index').onclick = async () => {
     renderTimeline();
     renderPlayers();
     await loadCameras();
-    toast(t('cameras.indexRebuilt', {count: result.recordings_deleted}), 'info');
+    S.session.range_index = result.range_index;
+    renderRangeIndexStatus();
+    if (result.range_index?.status === 'fallback') {
+      const message = result.range_index.error || t('cameras.rangeIndexUnknownError');
+      toast(t('cameras.indexRebuiltFallback', {
+        count: result.recordings_deleted, message,
+      }), 'warning');
+    } else {
+      toast(t('cameras.indexRebuilt', {count: result.recordings_deleted}), 'info');
+    }
   } catch (error) {
     const message = error.message === 'Indexing is in progress'
       ? t('cameras.indexBusy')
@@ -1251,6 +1276,7 @@ window._ctvRefreshLanguage = function() {
   renderCamList();
   renderCameraFilter();
   renderViewerCameraList();
+  renderRangeIndexStatus();
   renderTimeline();
   renderPlayers();
   updatePlayButton();

@@ -9,7 +9,7 @@ from ctv_server.config import deployment_mode, path_within_source_roots, source_
 from ctv_server.db import write_db
 from ctv_server.models import StreamProfilesUpdate
 from ctv_server.operations import IndexBusyError, maintenance_window
-from ctv_server.streaming import get_stream_profiles
+from ctv_server.streaming import get_stream_profiles, invalidate_stream_profiles
 from ctv_server.thumbnailer import THUMBNAIL_DIR
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -38,6 +38,7 @@ def update_stream_profiles(
                 """,
                 (profile.scale_percent, profile.fps, profile.bitrate_kbps, name),
             )
+    invalidate_stream_profiles()
     return get_stream_profiles()
 
 

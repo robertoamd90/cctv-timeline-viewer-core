@@ -2,7 +2,9 @@ import os
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -165,6 +167,42 @@ class IndexerTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
+
+    def test_probe_queue_is_bounded_by_worker_count(self):
+        for index in range(40):
+            (self.root / f"clip_{index:04d}.mp4").write_bytes(b"video")
+
+        class TrackingExecutor(RealThreadPoolExecutor):
+            maximum_outstanding = 0
+            outstanding = 0
+            guard = threading.Lock()
+
+            def submit(self, *args, **kwargs):
+                with self.guard:
+                    type(self).outstanding += 1
+                    type(self).maximum_outstanding = max(
+                        type(self).maximum_outstanding, type(self).outstanding,
+                    )
+                future = super().submit(*args, **kwargs)
+
+                def finished(_future):
+                    with self.guard:
+                        type(self).outstanding -= 1
+
+                future.add_done_callback(finished)
+                return future
+
+        def probe(_path):
+            time.sleep(0.005)
+            return {}
+
+        with patch.dict(os.environ, {"CTV_INDEX_WORKERS": "3"}), \
+             patch("ctv_server.indexer.ThreadPoolExecutor", TrackingExecutor), \
+             patch("ctv_server.indexer.get_ffprobe_data", side_effect=probe):
+            result = index_camera(self.camera_id, str(self.root))
+
+        self.assertEqual(result["new"], 40)
+        self.assertLessEqual(TrackingExecutor.maximum_outstanding, 6)
 
 
 class MigrationTests(unittest.TestCase):

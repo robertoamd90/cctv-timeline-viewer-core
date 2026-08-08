@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from ctv_server.db import init_db, get_db
+from ctv_server.db import close_db, init_db, get_db
 from ctv_server.api import cameras, recordings, scan, timeline, search, events, system
 from ctv_server.auth import user_from_request
 from ctv_server.config import is_home_assistant, trusted_ingress_proxies
@@ -87,10 +87,13 @@ async def lifespan(app: FastAPI):
     # Avvia scansione periodica in background
     _watcher_task = asyncio.create_task(_background_watcher())
     log.info("CTV server ready")
-    yield
-    _watcher_task.cancel()
-    await shutdown_hls_jobs()
-    log.info("CTV server shutting down")
+    try:
+        yield
+    finally:
+        _watcher_task.cancel()
+        await shutdown_hls_jobs()
+        close_db()
+        log.info("CTV server shutting down")
 
 
 app = FastAPI(

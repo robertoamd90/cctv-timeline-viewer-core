@@ -191,10 +191,21 @@ Pass `stable` or `beta` to generate only one channel.
 
 ```bash
 python3 -m unittest discover -v
+node tests/test_media.js
+node tests/test_hotspot.js
 node --check ctv_web/js/i18n.js
 node --check ctv_web/js/app.js
 node --check ctv_web/js/timeline.js
 node --check ctv_web/js/player.js
+```
+
+The synthetic performance checks use temporary databases and never access the
+configured CCTV archive:
+
+```bash
+python3 scripts/benchmark_performance.py --recordings 1000000
+python3 scripts/benchmark_indexer.py
+node scripts/benchmark_frontend.js
 ```
 
 ## License

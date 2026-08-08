@@ -8,6 +8,9 @@ const {
   playbackPlan,
   transcodedTailHasFrame,
   recordingAt,
+  latestRecordingAt,
+  lastSegmentStartingBetween,
+  overlappingSegments,
   mediaTimeForTimeline,
   timelineTimeForMedia,
   medianTime,
@@ -82,6 +85,25 @@ assert.equal(recordingAt(orderedSegments, 54321).id, 5432);
 assert.equal(recordingAt(orderedSegments, 54326), null);
 assert.equal(recordingAt(orderedSegments, -1), null);
 assert.equal(recordingAt([], 10), null);
+const overlapping = [
+  {id: 'long', start_ts: 0, end_ts: 100},
+  {id: 'short', start_ts: 10, end_ts: 20},
+  {id: 'point', start_ts: 30, end_ts: null},
+  {id: 'late', start_ts: 200, end_ts: 210},
+];
+assert.deepEqual(overlappingSegments(overlapping, 12, 15).map(segment => segment.id), ['long', 'short']);
+assert.deepEqual(overlappingSegments(overlapping, 30, 30).map(segment => segment.id), ['long', 'point']);
+assert.deepEqual(overlappingSegments(overlapping, 31, 40).map(segment => segment.id), ['long']);
+assert.equal(latestRecordingAt(overlapping, 15).id, 'short');
+assert.equal(latestRecordingAt(overlapping, 50).id, 'point');
+assert.equal(latestRecordingAt(overlapping, 150).id, 'point');
+assert.equal(lastSegmentStartingBetween(overlapping, 9, 30).id, 'point');
+const unsortedOverlapping = [overlapping[3], overlapping[0], overlapping[1]];
+assert.deepEqual(
+  overlappingSegments(unsortedOverlapping, 12, 15).map(segment => segment.id),
+  ['long', 'short'],
+);
+assert.equal(latestRecordingAt(unsortedOverlapping, 15).id, 'short');
 assert.equal(mediaTimeForTimeline(130, 100, 10, 4, 20), 5);
 assert.equal(timelineTimeForMedia(5, 100, 10, 4), 130);
 
@@ -127,6 +149,9 @@ assert.match(playerSource, /ctv-preload-mode/);
 assert.match(playerSource, /function updatePlaybackUi/);
 assert.match(playerSource, /isCompactViewport\(\) \? 50 : 33/);
 assert.match(timelineSource, /function updateOverviewPlayhead/);
+assert.match(timelineSource, /CtvMedia\.overlappingSegments/);
+assert.match(timelineSource, /_overviewBaseCache/);
+assert.match(timelineSource, /body\.addEventListener\('mouseover'/);
 const updateCursorSource = timelineSource.slice(
   timelineSource.indexOf('function updateCursor()'),
   timelineSource.indexOf('function updateOverviewPlayhead()'),

@@ -26,21 +26,32 @@ def scan_directory(source_path: str) -> list[dict]:
     if not os.path.isdir(source_path):
         raise FileNotFoundError(f"Sorgente non disponibile: {source_path}")
     files = []
-    def onerror(error):
-        raise error
-
-    for root, _, filenames in os.walk(source_path, onerror=onerror):
-        for f in filenames:
-            ext = Path(f).suffix.lower()
-            if ext in VIDEO_EXTENSIONS:
-                path = os.path.join(root, f)
+    pending_directories = [source_path]
+    while pending_directories:
+        directory = pending_directories.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    pending_directories.append(entry.path)
+                    continue
+                # os.walk does not descend into directory symlinks and does
+                # not expose them as files; retain that behavior.
+                if entry.is_symlink():
+                    try:
+                        if entry.is_dir(follow_symlinks=True):
+                            continue
+                    except FileNotFoundError:
+                        continue
+                ext = Path(entry.name).suffix.lower()
+                if ext not in VIDEO_EXTENSIONS:
+                    continue
                 try:
-                    stat = os.stat(path)
+                    stat = entry.stat(follow_symlinks=True)
                 except FileNotFoundError:
                     continue
                 files.append({
-                    "path": path,
-                    "filename": f,
+                    "path": entry.path,
+                    "filename": entry.name,
                     "ext": ext,
                     "size": stat.st_size,
                     "mtime": stat.st_mtime,

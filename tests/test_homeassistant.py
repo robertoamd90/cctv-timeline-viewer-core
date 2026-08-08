@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -13,8 +14,9 @@ from ctv_server import db
 from ctv_server.api.cameras import list_cameras, update_camera
 from ctv_server.api.events import _sanitize
 from ctv_server.api.recordings import _public_recording, list_recordings
+from ctv_server.api.search import search
 from ctv_server.api.system import list_source_directories, rebuild_index
-from ctv_server.api.timeline import get_timeline, prepare_timeline
+from ctv_server.api.timeline import get_timeline, get_timeline_bounds, prepare_timeline
 from ctv_server.auth import CurrentUser, require_admin, user_from_request
 from ctv_server.config import path_within_source_roots, source_roots
 from ctv_server.models import CameraUpdate
@@ -116,6 +118,187 @@ class SourceBrowserTests(unittest.TestCase):
 
 
 class PublicApiTests(unittest.TestCase):
+    def test_timeline_and_search_preserve_offset_boundary_semantics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                db.init_db()
+                start = 1_656_764_092.4331014
+                offset = -2_249.819440960884
+                public_start = start + offset
+                # Floating-point subtraction does not reconstruct this start
+                # exactly.  The optimized candidate lookup must still retain
+                # the original public `start + offset <= to` behavior.
+                self.assertGreater(start, public_start - offset)
+                conn = db.get_db()
+                camera_id = conn.execute(
+                    "INSERT INTO cameras "
+                    "(name, source_path, timezone, time_offset_seconds, indexing_mode) "
+                    "VALUES ('Boundary', ?, 'UTC', ?, 'full')",
+                    (tmp, offset),
+                ).lastrowid
+                conn.execute(
+                    "INSERT INTO recordings "
+                    "(camera_id, path, filename, start_ts, end_ts, duration) "
+                    "VALUES (?, 'boundary.mp4', 'boundary.mp4', ?, ?, 30)",
+                    (camera_id, start, start + 30),
+                )
+                conn.commit()
+                conn.close()
+
+                timeline = get_timeline(
+                    public_start - 1, public_start, str(camera_id),
+                )
+                results = search(
+                    q="boundary", camera_id=camera_id, from_ts=None,
+                    to_ts=public_start, min_duration=None, limit=10,
+                )
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(
+                [segment["filename"] for segment in timeline["cameras"][0]["segments"]],
+                ["boundary.mp4"],
+            )
+            self.assertEqual([result["filename"] for result in results], ["boundary.mp4"])
+
+    def test_timeline_interval_index_matches_fallback_for_random_ranges(self):
+        generator = random.Random(20260808)
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                db.init_db()
+                conn = db.get_db()
+                camera_id = conn.execute(
+                    "INSERT INTO cameras (name, source_path, timezone, time_offset_seconds, indexing_mode) "
+                    "VALUES ('Stress', ?, 'UTC', -3.75, 'full')", (tmp,),
+                ).lastrowid
+                rows = []
+                for index in range(300):
+                    start = generator.uniform(-20_000, 20_000)
+                    end = None if index % 17 == 0 else start + generator.uniform(0.01, 1_000)
+                    if index % 29 == 0:
+                        end = start - 5
+                    rows.append((
+                        camera_id, f"{index}.mp4", f"{index}.mp4", start, end,
+                        "missing" if index % 11 == 0 else "available",
+                    ))
+                conn.executemany(
+                    "INSERT INTO recordings "
+                    "(camera_id, path, filename, start_ts, end_ts, availability) "
+                    "VALUES (?, ?, ?, ?, ?, ?)", rows,
+                )
+                conn.commit()
+                conn.close()
+
+                ranges = []
+                for _ in range(60):
+                    start = generator.uniform(-21_000, 20_500)
+                    ranges.append((start, start + generator.uniform(0.001, 2_000)))
+                indexed = [
+                    get_timeline(start, end, str(camera_id)) for start, end in ranges
+                ]
+                indexed_search = [
+                    search(
+                        q="1", camera_id=None, from_ts=start, to_ts=end,
+                        min_duration=None, limit=25,
+                    )
+                    for start, end in ranges[:10]
+                ]
+
+                conn = db.get_db()
+                conn.execute(
+                    "UPDATE schema_state SET value = 'unavailable' "
+                    "WHERE key = 'recording_ranges_ready'"
+                )
+                conn.commit()
+                conn.close()
+                fallback = [
+                    get_timeline(start, end, str(camera_id)) for start, end in ranges
+                ]
+                fallback_search = [
+                    search(
+                        q="1", camera_id=None, from_ts=start, to_ts=end,
+                        min_duration=None, limit=25,
+                    )
+                    for start, end in ranges[:10]
+                ]
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(indexed, fallback)
+            self.assertEqual(indexed_search, fallback_search)
+
+    def test_timeline_interval_index_matches_exact_fallback_and_tracks_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                db.init_db()
+                conn = db.get_db()
+                camera_id = conn.execute(
+                    "INSERT INTO cameras (name, source_path, timezone, time_offset_seconds, indexing_mode) "
+                    "VALUES ('Garage', ?, 'UTC', -4.5, 'full')",
+                    (tmp,),
+                ).lastrowid
+                conn.executemany(
+                    "INSERT INTO recordings "
+                    "(camera_id, path, filename, start_ts, end_ts, availability) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        (camera_id, "long.mp4", "long.mp4", 100.125, 250.875, "available"),
+                        (camera_id, "point.mp4", "point.mp4", 260.25, None, "available"),
+                        (camera_id, "missing.mp4", "missing.mp4", 140, 240, "missing"),
+                    ),
+                )
+                conn.commit()
+                counts = conn.execute(
+                    "SELECT recordings_available, recordings_missing "
+                    "FROM camera_recording_counts WHERE camera_id = ?", (camera_id,)
+                ).fetchone()
+                conn.close()
+                self.assertEqual(tuple(counts), (2, 1))
+
+                indexed = get_timeline(95, 270, str(camera_id))
+                self.assertEqual(
+                    [segment["filename"] for segment in indexed["cameras"][0]["segments"]],
+                    ["long.mp4", "point.mp4"],
+                )
+                self.assertEqual(get_timeline_bounds(), {"first": 95.625, "last": 255.75})
+
+                conn = db.get_db()
+                conn.execute(
+                    "UPDATE schema_state SET value = 'unavailable' "
+                    "WHERE key = 'recording_ranges_ready'"
+                )
+                conn.commit()
+                conn.close()
+                self.assertEqual(get_timeline(95, 270, str(camera_id)), indexed)
+
+                conn = db.get_db()
+                conn.execute(
+                    "UPDATE schema_state SET value = '1' WHERE key = 'recording_ranges_ready'"
+                )
+                conn.execute(
+                    "UPDATE recordings SET start_ts = 500, end_ts = 510 WHERE filename = 'long.mp4'"
+                )
+                conn.execute("DELETE FROM recordings WHERE filename = 'point.mp4'")
+                conn.commit()
+                range_count = conn.execute("SELECT COUNT(*) FROM recording_ranges").fetchone()[0]
+                recording_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
+                counts = conn.execute(
+                    "SELECT recordings_available, recordings_missing "
+                    "FROM camera_recording_counts WHERE camera_id = ?", (camera_id,)
+                ).fetchone()
+                conn.close()
+                self.assertEqual(range_count, recording_count)
+                self.assertEqual(tuple(counts), (1, 1))
+                self.assertEqual(get_timeline(95, 270, str(camera_id))["cameras"][0]["segments"], [])
+                moved = get_timeline(495, 506, str(camera_id))["cameras"][0]["segments"]
+                self.assertEqual([segment["filename"] for segment in moved], ["long.mp4"])
+            finally:
+                db.DB_PATH = original
+
     def test_rebuild_index_preserves_cameras_and_deletes_derived_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH

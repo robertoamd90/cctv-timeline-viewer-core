@@ -7,10 +7,11 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-from ctv_server.db import get_db
+from ctv_server import db
 
 
 PROFILE_NAMES = ("balanced", "fast")
@@ -64,8 +65,10 @@ def initial_hls_segment_count(speed: float) -> int:
     return 1
 
 
-def get_stream_profiles() -> dict:
-    conn = get_db()
+@lru_cache(maxsize=8)
+def _configured_profile_rows(database_path: str) -> tuple:
+    del database_path
+    conn = db.get_db()
     rows = conn.execute(
         """
         SELECT name, scale_percent, fps, bitrate_kbps
@@ -74,15 +77,26 @@ def get_stream_profiles() -> dict:
         """
     ).fetchall()
     conn.close()
-    configured = {
-        row["name"]: {
-            "name": row["name"],
-            "configurable": True,
-            "scale_percent": row["scale_percent"],
-            "fps": row["fps"],
-            "bitrate_kbps": row["bitrate_kbps"],
-        }
+    return tuple(
+        (row["name"], row["scale_percent"], row["fps"], row["bitrate_kbps"])
         for row in rows
+    )
+
+
+def invalidate_stream_profiles():
+    _configured_profile_rows.cache_clear()
+
+
+def get_stream_profiles() -> dict:
+    configured = {
+        name: {
+            "name": name,
+            "configurable": True,
+            "scale_percent": scale_percent,
+            "fps": fps,
+            "bitrate_kbps": bitrate_kbps,
+        }
+        for name, scale_percent, fps, bitrate_kbps in _configured_profile_rows(db.DB_PATH)
     }
     return {
         "native": {

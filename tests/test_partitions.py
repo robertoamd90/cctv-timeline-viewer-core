@@ -5,12 +5,18 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from unittest.mock import patch
 
 from ctv_server import db
 from ctv_server.db import write_db
-from ctv_server.partition_service import prepare_partitions, run_partition_scan
+from ctv_server.partition_service import (
+    _generate_thumbnails,
+    prepare_partitions,
+    run_partition_scan,
+)
 from ctv_server.partitioner import dates_for_range, resolve_partition, validate_pattern
 from ctv_server.api.timeline import get_timeline
+from ctv_server.operations import index_generation, maintenance_window
 
 
 class PartitionerTests(unittest.TestCase):
@@ -163,6 +169,54 @@ class PartitionIndexTests(unittest.TestCase):
         run_partition_scan(self.camera_id, jobs[0]["key"], jobs[0]["path"])
 
         self.assertEqual(prepare_partitions([self.camera_id], start, end), [])
+
+    def test_thumbnail_worker_does_not_block_rebuild_maintenance(self):
+        media = self.day / "CAM_20260711010000.mp4"
+        media.write_bytes(b"video")
+        thumbnail = self.root / "generated.jpg"
+        conn = db.get_db()
+        recording_id = conn.execute(
+            "INSERT INTO recordings "
+            "(camera_id, path, filename, start_ts, partition_key) "
+            "VALUES (?, ?, ?, 1, '2026-07-11')",
+            (self.camera_id, str(media), media.name),
+        ).lastrowid
+        conn.commit()
+        conn.close()
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_thumbnail(_recording_id, _path):
+            started.set()
+            release.wait(timeout=2)
+            thumbnail.write_bytes(b"thumbnail")
+            return str(thumbnail)
+
+        generation = index_generation()
+        with patch(
+            "ctv_server.partition_service.generate_thumbnail",
+            side_effect=slow_thumbnail,
+        ):
+            worker = threading.Thread(
+                target=_generate_thumbnails,
+                args=(self.camera_id, "2026-07-11", generation),
+            )
+            worker.start()
+            self.assertTrue(started.wait(timeout=1))
+            with maintenance_window():
+                pass
+            release.set()
+            worker.join(timeout=2)
+
+        self.assertFalse(worker.is_alive())
+        conn = db.get_db()
+        stored = conn.execute(
+            "SELECT thumbnail_path FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()[0]
+        conn.close()
+        self.assertIsNone(stored)
+        self.assertFalse(thumbnail.exists())
 
     def _prepare_without_error(self, start, end, errors):
         try:

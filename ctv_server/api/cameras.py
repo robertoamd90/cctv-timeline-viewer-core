@@ -11,6 +11,26 @@ from ctv_server.partitioner import validate_pattern
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
 
+def _delete_camera_index_data(conn, camera_id: int) -> list[str]:
+    """Delete derived rows one at a time, avoiding disk-backed statement journals."""
+    recordings = conn.execute(
+        "SELECT id, thumbnail_path FROM recordings WHERE camera_id = ?", (camera_id,)
+    ).fetchall()
+    conn.executemany(
+        "DELETE FROM recordings WHERE id = ?",
+        ((row["id"],) for row in recordings),
+    )
+    partitions = conn.execute(
+        "SELECT partition_key FROM partitions WHERE camera_id = ?", (camera_id,)
+    ).fetchall()
+    conn.executemany(
+        "DELETE FROM partitions WHERE camera_id = ? AND partition_key = ?",
+        ((camera_id, row["partition_key"]) for row in partitions),
+    )
+    conn.execute("DELETE FROM camera_recording_counts WHERE camera_id = ?", (camera_id,))
+    return [row["thumbnail_path"] for row in recordings if row["thumbnail_path"]]
+
+
 def _local_tz() -> str:
     """Restituisce il timezone IANA del sistema (es. 'Europe/Rome').
     Su macOS/Linux legge /etc/localtime. Fallback a 'UTC'."""
@@ -127,14 +147,7 @@ def update_camera(
             previous["directory_pattern"] != pattern,
         ))
         if cache_changed:
-            thumbnails = [
-                row["thumbnail_path"] for row in conn.execute(
-                    "SELECT thumbnail_path FROM recordings WHERE camera_id = ? AND thumbnail_path IS NOT NULL",
-                    (camera_id,),
-                ).fetchall()
-            ]
-            conn.execute("DELETE FROM recordings WHERE camera_id = ?", (camera_id,))
-            conn.execute("DELETE FROM partitions WHERE camera_id = ?", (camera_id,))
+            thumbnails = _delete_camera_index_data(conn, camera_id)
         cur = conn.execute(
             "UPDATE cameras SET name = ?, source_path = ?, timezone = ?, time_offset_seconds = ?, "
             "indexing_mode = ?, directory_pattern = ?, "
@@ -171,8 +184,17 @@ def delete_camera(camera_id: int, _: CurrentUser = Depends(require_admin)):
 
     if is_scanning(camera_id):
         raise HTTPException(status_code=409, detail="Attendi la fine della scansione prima di eliminare la telecamera")
+    thumbnails = []
     with write_db() as conn:
+        camera = conn.execute("SELECT id FROM cameras WHERE id = ?", (camera_id,)).fetchone()
+        if camera:
+            thumbnails = _delete_camera_index_data(conn, camera_id)
         cur = conn.execute("DELETE FROM cameras WHERE id = ?", (camera_id,))
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Camera not found")
+    for thumbnail in thumbnails:
+        try:
+            os.unlink(thumbnail)
+        except OSError:
+            pass
     return {"deleted": camera_id}

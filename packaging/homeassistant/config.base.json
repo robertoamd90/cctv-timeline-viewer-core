@@ -33,7 +33,9 @@
     "CTV_DB": "/data/ctv.db",
     "CTV_THUMBNAILS": "/data/thumbnails",
     "CTV_SOURCE_ROOTS": "/media",
-    "CTV_TRUSTED_PROXIES": "172.30.32.2"
+    "CTV_TRUSTED_PROXIES": "172.30.32.2",
+    "SQLITE_TMPDIR": "/tmp",
+    "TMPDIR": "/tmp"
   },
   "watchdog": "http://[HOST]:[PORT:8000]/api/health",
   "backup": "cold",

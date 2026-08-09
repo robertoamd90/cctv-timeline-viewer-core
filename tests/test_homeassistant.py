@@ -2,6 +2,8 @@ import asyncio
 import os
 import random
 import tempfile
+import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -11,7 +13,7 @@ from starlette.requests import Request
 
 from ctv_server import auth
 from ctv_server import db
-from ctv_server.api.cameras import list_cameras, update_camera
+from ctv_server.api.cameras import delete_camera, list_cameras, update_camera
 from ctv_server.api.events import _sanitize
 from ctv_server.api.recordings import _public_recording, list_recordings
 from ctv_server.api.search import search
@@ -21,7 +23,7 @@ from ctv_server.auth import CurrentUser, require_admin, user_from_request
 from ctv_server.config import path_within_source_roots, source_roots
 from ctv_server.models import CameraUpdate
 from ctv_server.operations import (
-    begin_index_job, end_index_job, index_generation, maintenance_window,
+    IndexBusyError, begin_index_job, end_index_job, index_generation, maintenance_window,
 )
 
 
@@ -331,6 +333,52 @@ class PublicApiTests(unittest.TestCase):
             self.assertFalse(os.path.exists(thumbnail))
             self.assertEqual(result["timeline_index"], {"strategy": "partition_btree", "status": "ready"})
 
+    def test_delete_camera_removes_derived_rows_without_cascade_bulk_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            thumbnail = os.path.join(tmp, "thumb.jpg")
+            open(thumbnail, "wb").close()
+            try:
+                db.init_db()
+                conn = db.get_db()
+                camera_id = conn.execute(
+                    "INSERT INTO cameras (name, source_path) VALUES ('Garage', ?)", (tmp,)
+                ).lastrowid
+                conn.executemany(
+                    "INSERT INTO recordings "
+                    "(camera_id, path, filename, start_ts, thumbnail_path) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        (camera_id, f"clip-{index}.mp4", f"clip-{index}.mp4", index,
+                         thumbnail if index == 0 else None)
+                        for index in range(200)
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO partitions (camera_id, partition_key, path) VALUES (?, ?, ?)",
+                    ((camera_id, f"2026-07-{day:02d}", tmp) for day in range(1, 11)),
+                )
+                conn.commit()
+                conn.close()
+
+                result = delete_camera(
+                    camera_id, CurrentUser("admin", "admin", "Admin", True, True)
+                )
+                conn = db.get_db()
+                counts = tuple(conn.execute(
+                    "SELECT "
+                    "(SELECT COUNT(*) FROM cameras), "
+                    "(SELECT COUNT(*) FROM recordings), "
+                    "(SELECT COUNT(*) FROM partitions)"
+                ).fetchone())
+                conn.close()
+            finally:
+                db.DB_PATH = original
+            self.assertEqual(result, {"deleted": camera_id})
+            self.assertEqual(counts, (0, 0, 0))
+            self.assertFalse(os.path.exists(thumbnail))
+
     def test_rebuild_index_bypasses_a_broken_range_trigger(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH
@@ -442,15 +490,37 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual(admin_status, expected)
             self.assertEqual(viewer_status, expected)
 
-    def test_rebuild_index_rejects_active_scan(self):
+    def test_maintenance_window_rejects_active_scan_by_default(self):
         self.assertTrue(begin_index_job())
         try:
-            admin = CurrentUser("admin", "admin", "Admin", True, True)
-            with self.assertRaises(HTTPException) as raised:
-                rebuild_index(admin)
+            with self.assertRaises(IndexBusyError):
+                with maintenance_window():
+                    pass
         finally:
             end_index_job()
-        self.assertEqual(raised.exception.status_code, 409)
+
+    def test_rebuild_waits_for_active_scan_and_then_recovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                db.init_db()
+                self.assertTrue(begin_index_job())
+                result = []
+                worker = threading.Thread(
+                    target=lambda: result.append(rebuild_index(
+                        CurrentUser("admin", "admin", "Admin", True, True)
+                    ))
+                )
+                worker.start()
+                time.sleep(0.05)
+                self.assertTrue(worker.is_alive())
+                end_index_job()
+                worker.join(timeout=2)
+            finally:
+                db.DB_PATH = original
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(result[0]["status"], "rebuilt")
 
     def test_rebuild_invalidates_queued_index_jobs(self):
         queued_generation = index_generation()

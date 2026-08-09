@@ -28,15 +28,14 @@ def _lock_for(camera_id: int, key: str) -> threading.Lock:
 def _delete_partition_recordings(camera_id: int, key: str) -> int:
     with write_db() as conn:
         rows = conn.execute(
-            "SELECT thumbnail_path FROM recordings WHERE camera_id = ? AND partition_key = ?",
+            "SELECT id, thumbnail_path FROM recordings "
+            "WHERE camera_id = ? AND partition_key = ?",
             (camera_id, key),
         ).fetchall()
-        count = conn.execute(
-            "SELECT COUNT(*) FROM recordings WHERE camera_id = ? AND partition_key = ?",
-            (camera_id, key),
-        ).fetchone()[0]
-        conn.execute(
-            "DELETE FROM recordings WHERE camera_id = ? AND partition_key = ?", (camera_id, key)
+        count = len(rows)
+        conn.executemany(
+            "DELETE FROM recordings WHERE id = ?",
+            ((row["id"],) for row in rows),
         )
     for row in rows:
         if row["thumbnail_path"]:
@@ -67,38 +66,60 @@ def invalidate_partition(camera_id: int, key: str, path: str) -> dict:
     return payload
 
 
-def _generate_thumbnails(camera_id: int, key: str):
-    if not begin_index_job():
-        return
-    with _thumbnail_worker:
+def _discard_thumbnail_updates(updates: list[tuple[str, int]]):
+    for thumbnail, _ in updates:
         try:
-            conn = get_db()
-            rows = conn.execute(
-                "SELECT id, path FROM recordings WHERE camera_id = ? AND partition_key = ? "
-                "AND availability = 'available' AND media_kind = 'video' AND thumbnail_path IS NULL",
-                (camera_id, key),
-            ).fetchall()
-            conn.close()
-            updates = []
-            for row in rows:
-                thumb = generate_thumbnail(row["id"], row["path"])
-                if thumb:
-                    updates.append((thumb, row["id"]))
-            if updates:
-                with write_db() as conn:
-                    conn.executemany("UPDATE recordings SET thumbnail_path = ? WHERE id = ?", updates)
-            emit("partition", {"camera_id": camera_id, "partition": key, "status": "thumbnails_done"})
-        finally:
-            end_index_job()
+            os.unlink(thumbnail)
+        except OSError:
+            pass
+
+
+def _generate_thumbnails(camera_id: int, key: str, expected_generation: int):
+    # Thumbnails are disposable derived data and must never keep the recovery
+    # operation busy. Generation checks prevent stale workers writing after a
+    # rebuild has started.
+    with _thumbnail_worker:
+        if expected_generation != index_generation():
+            return
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT id, path FROM recordings WHERE camera_id = ? AND partition_key = ? "
+            "AND availability = 'available' AND media_kind = 'video' AND thumbnail_path IS NULL",
+            (camera_id, key),
+        ).fetchall()
+        conn.close()
+        updates = []
+        for row in rows:
+            if expected_generation != index_generation():
+                _discard_thumbnail_updates(updates)
+                return
+            thumb = generate_thumbnail(row["id"], row["path"])
+            if thumb:
+                updates.append((thumb, row["id"]))
+        if expected_generation != index_generation():
+            _discard_thumbnail_updates(updates)
+            return
+        if updates:
+            with write_db() as conn:
+                if expected_generation != index_generation():
+                    _discard_thumbnail_updates(updates)
+                    return
+                conn.executemany(
+                    "UPDATE recordings SET thumbnail_path = ? WHERE id = ?", updates
+                )
+        emit("partition", {"camera_id": camera_id, "partition": key, "status": "thumbnails_done"})
 
 
 def run_partition_scan(
     camera_id: int, key: str, path: str, expected_generation: Optional[int] = None
 ) -> dict:
+    job_generation = (
+        expected_generation if expected_generation is not None else index_generation()
+    )
     lock = _lock_for(camera_id, key)
     if not lock.acquire(blocking=False):
         return {"camera_id": camera_id, "partition": key, "status": "busy"}
-    if not begin_index_job(expected_generation):
+    if not begin_index_job(job_generation):
         lock.release()
         return {"camera_id": camera_id, "partition": key, "status": "busy"}
     stage = "reserve scan"
@@ -134,6 +155,8 @@ def run_partition_scan(
         last_progress = {"time": 0.0, "done": -1}
 
         def report_progress(done: int, total: int):
+            if job_generation != index_generation():
+                raise RuntimeError("Partition scan cancelled for database maintenance")
             now = time.monotonic()
             if done != total and now - last_progress["time"] < 0.5:
                 return
@@ -175,7 +198,9 @@ def run_partition_scan(
         emit("partition", payload)
         # Le miniature non ritardano ne la timeline ne le altre partizioni.
         threading.Thread(
-            target=_generate_thumbnails, args=(camera_id, key), daemon=True
+            target=_generate_thumbnails,
+            args=(camera_id, key, job_generation),
+            daemon=True,
         ).start()
         return payload
     except Exception as exc:

@@ -1,7 +1,6 @@
 import asyncio
 import os
 import random
-import sqlite3
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -163,7 +162,7 @@ class PublicApiTests(unittest.TestCase):
             )
             self.assertEqual([result["filename"] for result in results], ["boundary.mp4"])
 
-    def test_timeline_interval_index_matches_fallback_for_random_ranges(self):
+    def test_timeline_btree_matches_exact_overlap_for_random_ranges(self):
         generator = random.Random(20260808)
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH
@@ -197,10 +196,10 @@ class PublicApiTests(unittest.TestCase):
                 for _ in range(60):
                     start = generator.uniform(-21_000, 20_500)
                     ranges.append((start, start + generator.uniform(0.001, 2_000)))
-                indexed = [
+                timelines = [
                     get_timeline(start, end, str(camera_id)) for start, end in ranges
                 ]
-                indexed_search = [
+                searches = [
                     search(
                         q="1", camera_id=None, from_ts=start, to_ts=end,
                         min_duration=None, limit=25,
@@ -208,29 +207,33 @@ class PublicApiTests(unittest.TestCase):
                     for start, end in ranges[:10]
                 ]
 
-                conn = db.get_db()
-                conn.execute(
-                    "UPDATE schema_state SET value = 'unavailable' "
-                    "WHERE key = 'recording_ranges_ready'"
-                )
-                conn.commit()
-                conn.close()
-                fallback = [
-                    get_timeline(start, end, str(camera_id)) for start, end in ranges
-                ]
-                fallback_search = [
-                    search(
-                        q="1", camera_id=None, from_ts=start, to_ts=end,
-                        min_duration=None, limit=25,
-                    )
-                    for start, end in ranges[:10]
-                ]
             finally:
                 db.DB_PATH = original
-            self.assertEqual(indexed, fallback)
-            self.assertEqual(indexed_search, fallback_search)
+            offset = -3.75
+            for (range_start, range_end), timeline in zip(ranges, timelines):
+                expected = sorted(
+                    (row for row in rows
+                     if row[5] == "available"
+                     and (row[4] if row[4] is not None else row[3]) + offset >= range_start
+                     and row[3] + offset <= range_end),
+                    key=lambda row: row[3],
+                )
+                self.assertEqual(
+                    [segment["filename"] for segment in timeline["cameras"][0]["segments"]],
+                    [row[2] for row in expected],
+                )
+            for (range_start, range_end), results in zip(ranges[:10], searches):
+                expected = sorted(
+                    (row for row in rows
+                     if row[5] == "available" and "1" in row[2]
+                     and (row[4] if row[4] is not None else row[3]) + offset >= range_start
+                     and row[3] + offset <= range_end),
+                    key=lambda row: row[3] + offset,
+                    reverse=True,
+                )[:25]
+                self.assertEqual([result["filename"] for result in results], [row[2] for row in expected])
 
-    def test_timeline_interval_index_matches_exact_fallback_and_tracks_changes(self):
+    def test_timeline_btree_tracks_recording_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH
             db.DB_PATH = os.path.join(tmp, "ctv.db")
@@ -269,30 +272,15 @@ class PublicApiTests(unittest.TestCase):
 
                 conn = db.get_db()
                 conn.execute(
-                    "UPDATE schema_state SET value = 'unavailable' "
-                    "WHERE key = 'recording_ranges_ready'"
-                )
-                conn.commit()
-                conn.close()
-                self.assertEqual(get_timeline(95, 270, str(camera_id)), indexed)
-
-                conn = db.get_db()
-                conn.execute(
-                    "UPDATE schema_state SET value = '1' WHERE key = 'recording_ranges_ready'"
-                )
-                conn.execute(
                     "UPDATE recordings SET start_ts = 500, end_ts = 510 WHERE filename = 'long.mp4'"
                 )
                 conn.execute("DELETE FROM recordings WHERE filename = 'point.mp4'")
                 conn.commit()
-                range_count = conn.execute("SELECT COUNT(*) FROM recording_ranges").fetchone()[0]
-                recording_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
                 counts = conn.execute(
                     "SELECT recordings_available, recordings_missing "
                     "FROM camera_recording_counts WHERE camera_id = ?", (camera_id,)
                 ).fetchone()
                 conn.close()
-                self.assertEqual(range_count, recording_count)
                 self.assertEqual(tuple(counts), (1, 1))
                 self.assertEqual(get_timeline(95, 270, str(camera_id))["cameras"][0]["segments"], [])
                 moved = get_timeline(495, 506, str(camera_id))["cameras"][0]["segments"]
@@ -341,7 +329,7 @@ class PublicApiTests(unittest.TestCase):
             self.assertEqual((recordings, partitions), (0, 0))
             self.assertEqual(result["recordings_deleted"], 1)
             self.assertFalse(os.path.exists(thumbnail))
-            self.assertEqual(result["range_index"], {"status": "ready", "error": None})
+            self.assertEqual(result["timeline_index"], {"strategy": "partition_btree", "status": "ready"})
 
     def test_rebuild_index_bypasses_a_broken_range_trigger(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -358,7 +346,6 @@ class PublicApiTests(unittest.TestCase):
                     "INSERT INTO recordings (camera_id, path, filename, start_ts) "
                     "VALUES (?, 'clip.mp4', 'clip.mp4', 100)", (camera_id,),
                 )
-                conn.execute("DROP TRIGGER recordings_range_delete")
                 conn.execute("""
                     CREATE TRIGGER recordings_range_delete
                     BEFORE DELETE ON recordings
@@ -379,34 +366,49 @@ class PublicApiTests(unittest.TestCase):
                 )
                 conn.commit()
                 recording_count = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
-                range_count = conn.execute("SELECT COUNT(*) FROM recording_ranges").fetchone()[0]
+                range_triggers = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE 'recordings_range_%'"
+                ).fetchone()[0]
                 conn.close()
             finally:
                 db.DB_PATH = original
             self.assertEqual(result["recordings_deleted"], 1)
-            self.assertEqual(result["range_index"], {"status": "ready", "error": None})
-            self.assertEqual((recording_count, range_count), (1, 1))
+            self.assertEqual(result["timeline_index"], {"strategy": "partition_btree", "status": "ready"})
+            self.assertEqual((recording_count, range_triggers), (1, 0))
 
-    def test_startup_disables_range_hooks_when_write_probe_fails(self):
+    def test_startup_retires_legacy_rtree_and_write_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH
             db.DB_PATH = os.path.join(tmp, "ctv.db")
             try:
-                with patch(
-                    "ctv_server.db._probe_recording_range_index",
-                    side_effect=sqlite3.OperationalError("unable to open database file"),
-                ):
-                    db.init_db()
+                db.init_db()
+                conn = db.get_db()
+                conn.execute("""
+                    CREATE VIRTUAL TABLE recording_ranges USING rtree_i32(
+                        recording_id, camera_id_min, camera_id_max,
+                        start_bucket, end_bucket
+                    )
+                """)
+                conn.execute("""
+                    CREATE TRIGGER recordings_range_delete BEFORE DELETE ON recordings
+                    BEGIN SELECT RAISE(ABORT, 'legacy R-Tree write failed'); END
+                """)
+                conn.commit()
+                conn.close()
+
+                db.init_db()
                 conn = db.get_db()
                 state = conn.execute(
                     "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
                 ).fetchone()[0]
-                error = conn.execute(
-                    "SELECT value FROM schema_state WHERE key = 'recording_ranges_error'"
-                ).fetchone()[0]
                 triggers = conn.execute(
                     "SELECT COUNT(*) FROM sqlite_master "
                     "WHERE type = 'trigger' AND name LIKE 'recordings_range_%'"
+                ).fetchone()[0]
+                range_tables = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'recording_ranges'"
                 ).fetchone()[0]
                 camera_id = conn.execute(
                     "INSERT INTO cameras (name, source_path) VALUES ('Garage', ?)", (tmp,),
@@ -419,30 +421,26 @@ class PublicApiTests(unittest.TestCase):
                 conn.close()
             finally:
                 db.DB_PATH = original
-            self.assertEqual(state, "unavailable")
-            self.assertEqual(error, "unable to open database file")
-            self.assertEqual(triggers, 0)
+            self.assertEqual(state, "retired")
+            # The derived virtual table is deliberately left untouched: only
+            # its write hooks must disappear to isolate even a damaged R-Tree.
+            self.assertEqual((triggers, range_tables), (0, 1))
 
-    def test_session_exposes_range_fallback_diagnostic_only_to_admins(self):
+    def test_session_exposes_partition_btree_strategy(self):
         with tempfile.TemporaryDirectory() as tmp:
             original = db.DB_PATH
             db.DB_PATH = os.path.join(tmp, "ctv.db")
             try:
-                with patch(
-                    "ctv_server.db._probe_recording_range_index",
-                    side_effect=sqlite3.OperationalError("unable to open database file"),
-                ):
-                    db.init_db()
+                db.init_db()
                 admin = CurrentUser("admin", "admin", "Admin", True, True)
                 viewer = CurrentUser("viewer", "viewer", "Viewer", False, True)
-                admin_status = session(make_request(user=admin))["range_index"]
-                viewer_status = session(make_request(user=viewer))["range_index"]
+                admin_status = session(make_request(user=admin))["timeline_index"]
+                viewer_status = session(make_request(user=viewer))["timeline_index"]
             finally:
                 db.DB_PATH = original
-            self.assertEqual(admin_status, {
-                "status": "fallback", "error": "unable to open database file",
-            })
-            self.assertEqual(viewer_status, {"status": "fallback", "error": None})
+            expected = {"strategy": "partition_btree", "status": "ready"}
+            self.assertEqual(admin_status, expected)
+            self.assertEqual(viewer_status, expected)
 
     def test_rebuild_index_rejects_active_scan(self):
         self.assertTrue(begin_index_job())

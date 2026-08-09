@@ -2,11 +2,11 @@ import math
 from typing import Optional
 from fastapi import APIRouter, Query
 from ctv_server.db import (
-    RANGE_BUCKET_SECONDS,
     RECORDING_TIME_DELTA_SQL,
     get_db,
     recording_time_delta,
 )
+from ctv_server.partitioner import dates_for_range, partition_key
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -35,22 +35,19 @@ def search(
 ):
     """Cerca registrazioni per nome file, camera, intervallo, durata."""
     conn = get_db()
-    range_state = conn.execute(
-        "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
-    ).fetchone()
     finite_range = all(
         value is None or math.isfinite(value) for value in (from_ts, to_ts)
     )
     if (
-        range_state
-        and range_state["value"] == "1"
-        and finite_range
+        finite_range
         and (from_ts is not None or to_ts is not None)
     ):
         if limit == 0:
             conn.close()
             return []
-        camera_query = "SELECT id, name, time_offset_seconds FROM cameras"
+        camera_query = (
+            "SELECT id, name, time_offset_seconds, indexing_mode, timezone FROM cameras"
+        )
         camera_params = []
         if camera_id is not None:
             camera_query += " WHERE id = ?"
@@ -61,30 +58,42 @@ def search(
         for camera in cameras:
             offset = camera["time_offset_seconds"] or 0
             conditions = [
-                "ranges.camera_id_min <= ?",
-                "ranges.camera_id_max >= ?",
                 "r.camera_id = ?",
                 "r.availability = 'available'",
             ]
-            params = [camera["id"], camera["id"], camera["id"]]
+            params = [camera["id"]]
             if from_ts is not None:
                 physical_from = from_ts - offset
                 conditions.extend((
-                    "ranges.end_bucket >= ?",
-                    "r.end_ts + ? >= ?",
+                    "COALESCE(r.end_ts, r.start_ts) >= ?",
+                    "COALESCE(r.end_ts, r.start_ts) + ? >= ?",
                 ))
                 params.extend((
-                    math.floor(physical_from / RANGE_BUCKET_SECONDS), offset, from_ts,
+                    math.nextafter(physical_from, -math.inf), offset, from_ts,
                 ))
             if to_ts is not None:
                 physical_to = to_ts - offset
-                conditions.extend((
-                    "ranges.start_bucket <= ?",
-                    "r.start_ts + ? <= ?",
-                ))
+                conditions.extend(("r.start_ts <= ?", "r.start_ts + ? <= ?"))
                 params.extend((
-                    math.ceil(physical_to / RANGE_BUCKET_SECONDS), offset, to_ts,
+                    math.nextafter(physical_to, math.inf), offset, to_ts,
                 ))
+            if (
+                camera["indexing_mode"] == "partitioned"
+                and from_ts is not None
+                and to_ts is not None
+            ):
+                keys = [
+                    partition_key(day)
+                    for day in dates_for_range(
+                        from_ts - offset, to_ts - offset, camera["timezone"]
+                    )
+                ]
+                if not keys:
+                    continue
+                conditions.append(
+                    "r.partition_key IN (" + ",".join("?" for _ in keys) + ")"
+                )
+                params.extend(keys)
             if q:
                 conditions.append("(r.filename LIKE ? OR ? LIKE ?)")
                 params.extend((pattern, camera["name"], pattern))
@@ -95,8 +104,7 @@ def search(
             rows.extend(conn.execute(f"""
                 SELECT r.id, r.camera_id, r.filename, r.start_ts, r.end_ts, r.duration,
                        ? AS camera_name, ? AS time_offset_seconds
-                FROM recording_ranges ranges
-                JOIN recordings r ON r.id = ranges.recording_id
+                FROM recordings r
                 WHERE {' AND '.join(conditions)}
                 ORDER BY r.start_ts DESC
                 LIMIT ?

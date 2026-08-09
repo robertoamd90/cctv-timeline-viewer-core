@@ -101,6 +101,7 @@ def run_partition_scan(
     if not begin_index_job(expected_generation):
         lock.release()
         return {"camera_id": camera_id, "partition": key, "status": "busy"}
+    stage = "reserve scan"
     try:
         with write_db() as conn:
             camera = conn.execute(
@@ -119,6 +120,7 @@ def run_partition_scan(
             )
         emit("partition", {"camera_id": camera_id, "partition": key, "status": "started"})
 
+        stage = "validate source"
         if not os.path.isdir(camera["source_path"]):
             raise FileNotFoundError(f"Sorgente non disponibile: {camera['source_path']}")
         try:
@@ -146,6 +148,7 @@ def run_partition_scan(
                 "camera_id": camera_id, "partition": key, "done": done, "total": total,
             })
 
+        stage = "index recordings"
         result = index_camera(
             camera_id,
             path,
@@ -154,6 +157,7 @@ def run_partition_scan(
             purge_missing=True,
             progress=report_progress,
         )
+        stage = "finalize scan"
         completed = time.time()
         with write_db() as conn:
             conn.execute("""
@@ -175,16 +179,26 @@ def run_partition_scan(
         ).start()
         return payload
     except Exception as exc:
-        message = sqlite_error_details(exc) if isinstance(exc, sqlite3.Error) else str(exc)
-        log.warning("Partition scan failed for camera %d, %s: %s", camera_id, key, message)
-        with write_db() as conn:
-            conn.execute(
-                "UPDATE partitions SET status = 'error', error = ? WHERE camera_id = ? AND partition_key = ?",
-                (message, camera_id, key),
-            )
-            conn.execute(
-                "UPDATE cameras SET source_status = 'offline', source_error = ? WHERE id = ?",
-                (message, camera_id),
+        details = sqlite_error_details(exc) if isinstance(exc, sqlite3.Error) else str(exc)
+        message = f"{stage}: {details}"
+        log.warning(
+            "Partition scan failed for camera %d, %s during %s: %s",
+            camera_id, key, stage, details,
+        )
+        try:
+            with write_db() as conn:
+                conn.execute(
+                    "UPDATE partitions SET status = 'error', error = ? WHERE camera_id = ? AND partition_key = ?",
+                    (message, camera_id, key),
+                )
+                conn.execute(
+                    "UPDATE cameras SET source_status = 'offline', source_error = ? WHERE id = ?",
+                    (message, camera_id),
+                )
+        except sqlite3.Error as status_exc:
+            log.error(
+                "Could not persist partition error for camera %d, %s: %s",
+                camera_id, key, sqlite_error_details(status_exc),
             )
         payload = {"camera_id": camera_id, "partition": key, "status": "error", "error": message}
         emit("partition", payload)

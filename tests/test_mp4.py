@@ -92,6 +92,34 @@ class Mp4DurationTests(unittest.TestCase):
             self.assertEqual(headers["content-range"], f"bytes 10-79/{len(original)}")
             self.assertEqual(content, patch_chunk(original[10:80], 10, patches))
 
+    def test_video_response_recovers_from_stale_unsatisfiable_range(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "clip.mp4"
+            original = fragmented_mp4()
+            path.write_bytes(original)
+            response = VideoFileResponse(path, media_type="video/mp4")
+            messages = []
+
+            async def send(message):
+                messages.append(message)
+
+            async def receive():
+                return {"type": "http.disconnect"}
+
+            asyncio.run(response({
+                "type": "http",
+                "method": "GET",
+                "headers": [(b"range", b"bytes=999999-")],
+                "extensions": {},
+            }, receive, send))
+
+            start = messages[0]
+            headers = {key.decode(): value.decode() for key, value in start["headers"]}
+            content = b"".join(message.get("body", b"") for message in messages[1:])
+            self.assertEqual(start["status"], 200)
+            self.assertEqual(headers["cache-control"], "private, no-store")
+            self.assertEqual(content, original)
+
 
 if __name__ == "__main__":
     unittest.main()

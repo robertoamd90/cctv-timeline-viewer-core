@@ -1,4 +1,5 @@
 import os
+import logging
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -12,6 +13,8 @@ from ctv_server.scanner import (
     parse_ffprobe,
     scan_directory,
 )
+
+log = logging.getLogger("ctv.indexer")
 
 
 def index_camera(
@@ -103,6 +106,15 @@ def index_camera(
                 if progress:
                     progress(done, len(files))
                 submit_next()
+
+    missing_durations = [values[2] for values in prepared if values[5] <= 0]
+    if missing_durations:
+        examples = ", ".join(missing_durations[:3])
+        log.warning(
+            "No usable duration metadata for %d file(s); timeline segments will be "
+            "point-sized. Examples: %s",
+            len(missing_durations), examples,
+        )
 
     with write_db() as conn:
         scope = "camera_id = ?"

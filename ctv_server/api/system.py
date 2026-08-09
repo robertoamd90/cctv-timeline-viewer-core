@@ -9,9 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from ctv_server.auth import CurrentUser, current_user, require_admin
 from ctv_server.config import deployment_mode, path_within_source_roots, source_roots
 from ctv_server.db import (
-    disable_recording_range_index,
-    recording_range_status,
-    reset_recording_range_index,
+    retire_recording_range_index,
     sqlite_error_details,
     write_db,
 )
@@ -55,8 +53,7 @@ def update_stream_profiles(
 def rebuild_index(_: CurrentUser = Depends(require_admin)):
     try:
         with maintenance_window():
-            # The interval index is derived data.  Disable its hooks first so
-            # corruption in that index can never prevent the recovery action.
+            # Remove hooks left by early v0.1.27 betas before deleting rows.
             with write_db() as conn:
                 recordings = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
                 partitions = conn.execute("SELECT COUNT(*) FROM partitions").fetchone()[0]
@@ -65,7 +62,7 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                         "SELECT thumbnail_path FROM recordings WHERE thumbnail_path IS NOT NULL"
                     ).fetchall()
                 }
-                disable_recording_range_index(conn)
+                retire_recording_range_index(conn)
 
             with write_db() as conn:
                 conn.execute("DELETE FROM recordings")
@@ -75,9 +72,6 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                     "UPDATE cameras SET source_status = 'unknown', source_error = NULL, "
                     "last_scan_started = NULL, last_scan_completed = NULL"
                 )
-
-            reset_recording_range_index()
-            range_index = recording_range_status()
 
             thumbnail_paths.update(str(path) for path in Path(THUMBNAIL_DIR).glob("*.jpg"))
             thumbnails = 0
@@ -104,16 +98,13 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
         "recordings_deleted": recordings,
         "partitions_deleted": partitions,
         "thumbnails_deleted": thumbnails,
-        "range_index": range_index,
+        "timeline_index": {"strategy": "partition_btree", "status": "ready"},
     }
 
 
 @router.get("/session")
 def session(request: Request):
     user = current_user(request)
-    range_index = recording_range_status()
-    if not user.is_admin:
-        range_index["error"] = None
     return {
         "deployment": deployment_mode(),
         "authenticated": True,
@@ -125,7 +116,7 @@ def session(request: Request):
         "is_admin": user.is_admin,
         "role_resolved": user.role_resolved,
         "source_roots": list(source_roots()) if user.is_admin else [],
-        "range_index": range_index,
+        "timeline_index": {"strategy": "partition_btree", "status": "ready"},
     }
 
 

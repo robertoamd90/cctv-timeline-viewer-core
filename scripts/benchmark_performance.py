@@ -10,6 +10,7 @@ unit test.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import statistics
 import sys
@@ -55,7 +56,7 @@ def populate(total_recordings: int, camera_count: int) -> tuple[float, float, li
             INSERT INTO cameras (
                 name, source_path, timezone, time_offset_seconds, indexing_mode,
                 source_status
-            ) VALUES (?, ?, 'UTC', ?, 'full', 'online')
+            ) VALUES (?, ?, 'UTC', ?, 'partitioned', 'online')
             """,
             (f"Camera {camera_index:02d}", f"/synthetic/camera-{camera_index}", camera_index * 0.25),
         )
@@ -67,6 +68,7 @@ def populate(total_recordings: int, camera_count: int) -> tuple[float, float, li
     for camera_id in camera_ids:
         for recording_index in range(per_camera):
             start = base + recording_index * 60
+            key = datetime.fromtimestamp(start, timezone.utc).strftime("%Y-%m-%d")
             batch.append((
                 camera_id,
                 f"/synthetic/camera-{camera_id}/{recording_index:08d}.mp4",
@@ -77,14 +79,15 @@ def populate(total_recordings: int, camera_count: int) -> tuple[float, float, li
                 1_000_000,
                 start,
                 start,
+                key,
             ))
             if len(batch) >= 10_000:
                 conn.executemany(
                     """
                     INSERT INTO recordings (
                         camera_id, path, filename, start_ts, end_ts, duration,
-                        size, mtime, last_seen
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        size, mtime, last_seen, partition_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     batch,
                 )
@@ -94,8 +97,8 @@ def populate(total_recordings: int, camera_count: int) -> tuple[float, float, li
             """
             INSERT INTO recordings (
                 camera_id, path, filename, start_ts, end_ts, duration,
-                size, mtime, last_seen
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                size, mtime, last_seen, partition_key
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             batch,
         )

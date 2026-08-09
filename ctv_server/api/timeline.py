@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from ctv_server.db import RANGE_BUCKET_SECONDS, get_db
+from ctv_server.db import get_db
 from ctv_server.partition_service import prepare_partitions, run_partition_scan
 from ctv_server.partitioner import dates_for_range, partition_key
 
@@ -101,6 +101,7 @@ def get_timeline(
     selected_cameras = conn.execute(camera_query, camera_params).fetchall()
 
     cameras_map: dict = {}
+    partition_keys_by_camera: dict[int, list[str]] = {}
     for camera in selected_cameras:
         state = "ready" if camera["indexing_mode"] == "full" else "unknown"
         progress_done = progress_total = 0
@@ -110,6 +111,7 @@ def get_timeline(
                 partition_key(day)
                 for day in dates_for_range(from_ts - offset, to_ts - offset, camera["timezone"])
             ]
+            partition_keys_by_camera[camera["id"]] = keys
             placeholders = ",".join("?" for _ in keys)
             partitions = conn.execute(
                 f"SELECT status, progress_done, progress_total FROM partitions "
@@ -136,61 +138,58 @@ def get_timeline(
             "segments": [],
         }
 
-    range_state = conn.execute(
-        "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
-    ).fetchone()
-    use_range_index = bool(range_state and range_state["value"] == "1")
     columns = (
         "r.id, r.camera_id, r.filename, r.start_ts, r.end_ts, "
         "r.duration, r.media_kind, r.thumbnail_path"
     )
 
-    # Camera offsets differ, so querying each camera in its physical time range
-    # avoids an expression over every row.  The R-Tree returns only intervals
-    # intersecting the requested window; exact predicates below remove the
-    # intentionally coarse integer buckets.
+    # Camera offsets differ, so query each camera in its physical time range.
+    # Partitioned cameras are constrained to the exact daily partitions for
+    # the requested window; the composite B-tree then keeps this lookup small.
     for camera in selected_cameras:
         camera_id = camera["id"]
         offset = camera["time_offset_seconds"] or 0
         physical_from = from_ts - offset
         physical_to = to_ts - offset
-        partition_clause = (
-            "" if camera["indexing_mode"] == "full" else " AND r.partition_key IS NOT NULL"
-        )
-        if use_range_index:
-            query = f"""
-                SELECT {columns}
-                FROM recording_ranges ranges
-                JOIN recordings r ON r.id = ranges.recording_id
-                WHERE ranges.camera_id_min <= ? AND ranges.camera_id_max >= ?
-                  AND ranges.start_bucket <= ? AND ranges.end_bucket >= ?
-                  AND r.camera_id = ? AND r.availability = 'available'
-                  {partition_clause}
-                  AND COALESCE(r.end_ts, r.start_ts) + ? >= ?
-                  AND r.start_ts + ? <= ?
-                ORDER BY r.start_ts
-            """
-            rows = conn.execute(query, (
-                camera_id,
-                camera_id,
-                math.ceil(physical_to / RANGE_BUCKET_SECONDS),
-                math.floor(physical_from / RANGE_BUCKET_SECONDS),
-                camera_id,
-                offset,
-                from_ts,
-                offset,
-                to_ts,
-            )).fetchall()
+        conditions = [
+            "r.camera_id = ?",
+            "r.availability = 'available'",
+            "COALESCE(r.end_ts, r.start_ts) >= ?",
+            "r.start_ts <= ?",
+            "COALESCE(r.end_ts, r.start_ts) + ? >= ?",
+            "r.start_ts + ? <= ?",
+        ]
+        params: list = [
+            camera_id,
+            math.nextafter(physical_from, -math.inf),
+            math.nextafter(physical_to, math.inf),
+            offset,
+            from_ts,
+            offset,
+            to_ts,
+        ]
+        if camera["indexing_mode"] == "partitioned":
+            keys = partition_keys_by_camera.get(camera_id, [])
+            if not keys:
+                rows = []
+            else:
+                conditions.append(
+                    "r.partition_key IN (" + ",".join("?" for _ in keys) + ")"
+                )
+                params.extend(keys)
+                rows = conn.execute(f"""
+                    SELECT {columns}
+                    FROM recordings r
+                    WHERE {' AND '.join(conditions)}
+                    ORDER BY r.start_ts
+                """, params).fetchall()
         else:
             rows = conn.execute(f"""
                 SELECT {columns}
                 FROM recordings r
-                WHERE r.camera_id = ? AND r.availability = 'available'
-                  {partition_clause}
-                  AND COALESCE(r.end_ts, r.start_ts) + ? >= ?
-                  AND r.start_ts + ? <= ?
+                WHERE {' AND '.join(conditions)}
                 ORDER BY r.start_ts
-            """, (camera_id, offset, from_ts, offset, to_ts)).fetchall()
+            """, params).fetchall()
 
         segments = cameras_map[camera_id]["segments"]
         for row in rows:

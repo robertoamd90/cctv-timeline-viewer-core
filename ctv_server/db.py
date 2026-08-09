@@ -1,7 +1,6 @@
 import sqlite3
 import os
 import threading
-import logging
 from collections.abc import Iterable
 from contextlib import contextmanager
 
@@ -9,13 +8,9 @@ DB_PATH = os.environ.get("CTV_DB", os.path.expanduser("~/.ctv/ctv.db"))
 _WRITE_LOCK = threading.Lock()
 _ANCHOR_LOCK = threading.Lock()
 _ANCHOR_CONNECTION = None
-log = logging.getLogger("ctv.db")
 RECORDING_TIME_DELTA_SQL = (
     "COALESCE(c.time_offset_seconds, 0)"
 )
-# 128-second buckets cover the complete practical datetime range while exact
-# predicates keep the public interval semantics at sub-second precision.
-RANGE_BUCKET_SECONDS = 128
 _RANGE_TRIGGER_NAMES = (
     "recordings_range_insert",
     "recordings_range_update",
@@ -86,38 +81,18 @@ def _add_columns(conn: sqlite3.Connection, table: str, definitions: Iterable[str
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
 
-def _range_bucket_sql(value: str, *, upper: bool) -> str:
-    """Return an outward-rounded integer bucket expression for an SQL value."""
-    scaled = f"(({value}) / {RANGE_BUCKET_SECONDS}.0)"
-    integer = f"CAST({scaled} AS INTEGER)"
-    comparison = ">" if upper else "<"
-    adjustment = "+" if upper else "-"
-    return f"({integer} {adjustment} ({scaled} {comparison} {integer}))"
-
-
-def _set_recording_range_state(
-    conn: sqlite3.Connection, value: str, error=None,
-):
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_state (key, value) "
-        "VALUES ('recording_ranges_ready', ?)",
-        (value,),
-    )
-    if error:
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_state (key, value) "
-            "VALUES ('recording_ranges_error', ?)",
-            (error,),
-        )
-    else:
-        conn.execute("DELETE FROM schema_state WHERE key = 'recording_ranges_error'")
-
-
-def disable_recording_range_index(conn: sqlite3.Connection, error=None):
-    """Remove write hooks so a broken derived index cannot block core writes."""
+def retire_recording_range_index(conn: sqlite3.Connection):
+    """Detach the former R-Tree so it can no longer affect core writes."""
     for trigger in _RANGE_TRIGGER_NAMES:
         conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-    _set_recording_range_state(conn, "unavailable", error)
+    # Do not open or drop the derived virtual table here.  A damaged R-Tree is
+    # precisely what this migration must isolate; with its triggers removed it
+    # is inert and can safely remain as unused legacy data.
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_state (key, value) "
+        "VALUES ('recording_ranges_ready', 'retired')"
+    )
+    conn.execute("DELETE FROM schema_state WHERE key = 'recording_ranges_error'")
 
 
 def sqlite_error_details(exc: sqlite3.Error) -> str:
@@ -125,140 +100,6 @@ def sqlite_error_details(exc: sqlite3.Error) -> str:
     code = getattr(exc, "sqlite_errorcode", None)
     suffix = f" ({name}/{code})" if name or code is not None else ""
     return f"{exc}{suffix}"
-
-
-def recording_range_status() -> dict:
-    conn = get_db()
-    try:
-        values = {
-            row["key"]: row["value"]
-            for row in conn.execute(
-                "SELECT key, value FROM schema_state "
-                "WHERE key IN ('recording_ranges_ready', 'recording_ranges_error')"
-            )
-        }
-    finally:
-        conn.close()
-    ready = values.get("recording_ranges_ready") == "1"
-    return {
-        "status": "ready" if ready else "fallback",
-        "error": None if ready else values.get("recording_ranges_error"),
-    }
-
-
-def _probe_recording_range_index(conn: sqlite3.Connection):
-    """Exercise an R-Tree write and roll it back without changing derived data."""
-    conn.execute("SAVEPOINT recording_ranges_probe")
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO recording_ranges VALUES (?, 0, 0, 0, 0)",
-            (-2_147_483_648,),
-        )
-        conn.execute(
-            "DELETE FROM recording_ranges WHERE recording_id = ?",
-            (-2_147_483_648,),
-        )
-    except sqlite3.Error:
-        conn.execute("ROLLBACK TO recording_ranges_probe")
-        conn.execute("RELEASE recording_ranges_probe")
-        raise
-    conn.execute("ROLLBACK TO recording_ranges_probe")
-    conn.execute("RELEASE recording_ranges_probe")
-
-
-def _init_recording_range_index(conn: sqlite3.Connection) -> bool:
-    """Create a derived interval index, falling back safely if it is unusable."""
-    ready = conn.execute(
-        "SELECT value FROM schema_state WHERE key = 'recording_ranges_ready'"
-    ).fetchone()
-    exists = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recording_ranges'"
-    ).fetchone()
-    if not exists:
-        try:
-            conn.execute("""
-                CREATE VIRTUAL TABLE recording_ranges USING rtree_i32(
-                    recording_id,
-                    camera_id_min, camera_id_max,
-                    start_bucket, end_bucket
-                )
-            """)
-        except sqlite3.OperationalError as exc:
-            detail = sqlite_error_details(exc)
-            if "no such module" not in str(exc).lower():
-                log.warning("Recording range index unavailable: %s", detail)
-            disable_recording_range_index(conn, detail)
-            return False
-
-    start_value = "MIN(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
-    end_value = "MAX(NEW.start_ts, COALESCE(NEW.end_ts, NEW.start_ts))"
-    start_bucket = _range_bucket_sql(start_value, upper=False)
-    end_bucket = _range_bucket_sql(end_value, upper=True)
-    conn.executescript(f"""
-        CREATE TRIGGER IF NOT EXISTS recordings_range_insert
-        AFTER INSERT ON recordings
-        BEGIN
-            INSERT OR REPLACE INTO recording_ranges VALUES (
-                NEW.id, NEW.camera_id, NEW.camera_id, {start_bucket}, {end_bucket}
-            );
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS recordings_range_update
-        AFTER UPDATE OF camera_id, start_ts, end_ts ON recordings
-        BEGIN
-            DELETE FROM recording_ranges WHERE recording_id = OLD.id;
-            INSERT OR REPLACE INTO recording_ranges VALUES (
-                NEW.id, NEW.camera_id, NEW.camera_id, {start_bucket}, {end_bucket}
-            );
-        END;
-
-        CREATE TRIGGER IF NOT EXISTS recordings_range_delete
-        AFTER DELETE ON recordings
-        BEGIN
-            DELETE FROM recording_ranges WHERE recording_id = OLD.id;
-        END;
-    """)
-    if not ready or ready["value"] != "1":
-        conn.execute("DELETE FROM recording_ranges")
-        source_start = _range_bucket_sql(
-            "MIN(start_ts, COALESCE(end_ts, start_ts))", upper=False,
-        )
-        source_end = _range_bucket_sql(
-            "MAX(start_ts, COALESCE(end_ts, start_ts))", upper=True,
-        )
-        conn.execute(f"""
-            INSERT INTO recording_ranges
-            SELECT id, camera_id, camera_id, {source_start}, {source_end}
-            FROM recordings
-        """)
-        _set_recording_range_state(conn, "1")
-    try:
-        _probe_recording_range_index(conn)
-    except sqlite3.Error as exc:
-        detail = sqlite_error_details(exc)
-        log.warning("Recording range index write probe failed: %s", detail)
-        disable_recording_range_index(conn, detail)
-        return False
-    _set_recording_range_state(conn, "1")
-    return True
-
-
-def reset_recording_range_index() -> bool:
-    """Replace the disposable R-Tree without making core data depend on success."""
-    try:
-        with write_db() as conn:
-            disable_recording_range_index(conn)
-            conn.execute("DROP TABLE IF EXISTS recording_ranges")
-        with write_db() as conn:
-            return _init_recording_range_index(conn)
-    except sqlite3.Error as exc:
-        detail = sqlite_error_details(exc)
-        log.warning("Recording range index reset failed: %s", detail)
-        # DROP can fail for a damaged virtual table.  Dropping the hooks in a
-        # separate transaction still restores normal writes and SQL fallback.
-        with write_db() as conn:
-            disable_recording_range_index(conn, detail)
-        return False
 
 
 def _init_recording_counts(conn: sqlite3.Connection):
@@ -449,6 +290,18 @@ def init_db():
     ))
     conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_availability ON recordings(camera_id, availability)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_partition ON recordings(camera_id, partition_key)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recordings_camera_available_start "
+        "ON recordings(camera_id, availability, start_ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recordings_partition_time "
+        "ON recordings(camera_id, partition_key, availability, start_ts)"
+    )
+    # v0.1.27 beta initially used an R-Tree maintained by triggers. Detach it
+    # before any recording cleanup so an unusable virtual table cannot block
+    # startup, scans or rebuilds on existing databases.
+    retire_recording_range_index(conn)
     image_thumbnails = [
         row[0] for row in conn.execute("""
             SELECT thumbnail_path FROM recordings
@@ -475,7 +328,6 @@ def init_db():
         WHERE partition_key IS NULL
           AND camera_id IN (SELECT id FROM cameras WHERE indexing_mode = 'partitioned')
     """)
-    _init_recording_range_index(conn)
     _init_recording_counts(conn)
     conn.commit()
     _keep_wal_open(conn)

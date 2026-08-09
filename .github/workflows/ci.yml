@@ -61,6 +61,9 @@ jobs:
           assert app["ingress"] is True and app["ingress_stream"] is True
           assert app["panel_admin"] is True
           assert str(app["environment"]["CTV_HA_ADMIN_ONLY"]) == "1"
+          assert app["environment"]["SQLITE_TMPDIR"] == "/tmp"
+          assert beta["environment"]["SQLITE_TMPDIR"] == "/tmp"
+          assert app["environment"]["TMPDIR"] == "/tmp"
           assert any(item.get("type") == "media" and item.get("read_only") for item in app["map"])
           with open("addons/cctv_viewer/apparmor.txt", encoding="utf-8") as handle:
               apparmor = handle.read()
@@ -69,6 +72,8 @@ jobs:
           with open("addons/cctv_viewer_beta/apparmor.txt", encoding="utf-8") as handle:
               beta_apparmor = handle.read()
           assert "profile cctv_viewer_beta " in beta_apparmor
+          assert "/tmp/ rw," in beta_apparmor
+          assert "/tmp/** rwk," in beta_apparmor
           PY
       - name: Build container
         run: docker build --build-arg BUILD_VERSION=ci -t cctv-viewer:ci .

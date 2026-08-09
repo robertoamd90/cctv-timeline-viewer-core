@@ -1,13 +1,12 @@
 import sqlite3
 import os
+import tempfile
 import threading
 from collections.abc import Iterable
 from contextlib import contextmanager
 
 DB_PATH = os.environ.get("CTV_DB", os.path.expanduser("~/.ctv/ctv.db"))
 _WRITE_LOCK = threading.Lock()
-_ANCHOR_LOCK = threading.Lock()
-_ANCHOR_CONNECTION = None
 RECORDING_TIME_DELTA_SQL = (
     "COALESCE(c.time_offset_seconds, 0)"
 )
@@ -34,24 +33,8 @@ def get_db() -> sqlite3.Connection:
     return conn
 
 
-def _keep_wal_open(conn: sqlite3.Connection):
-    """Keep WAL shared state warm instead of recreating it for every request."""
-    global _ANCHOR_CONNECTION
-    with _ANCHOR_LOCK:
-        previous = _ANCHOR_CONNECTION
-        _ANCHOR_CONNECTION = conn
-    if previous is not None and previous is not conn:
-        previous.close()
-
-
 def close_db():
-    """Close process-wide SQLite state during application shutdown."""
-    global _ANCHOR_CONNECTION
-    with _ANCHOR_LOCK:
-        connection = _ANCHOR_CONNECTION
-        _ANCHOR_CONNECTION = None
-    if connection is not None:
-        connection.close()
+    """Compatibility hook: database connections are all short-lived."""
 
 
 @contextmanager
@@ -100,6 +83,21 @@ def sqlite_error_details(exc: sqlite3.Error) -> str:
     code = getattr(exc, "sqlite_errorcode", None)
     suffix = f" ({name}/{code})" if name or code is not None else ""
     return f"{exc}{suffix}"
+
+
+def _verify_sqlite_temp_directory():
+    """Fail at startup with a precise error if the configured VFS temp path is denied."""
+    directory = os.environ.get("SQLITE_TMPDIR")
+    if not directory:
+        return
+    try:
+        with tempfile.TemporaryFile(dir=directory) as probe:
+            probe.write(b"ctv")
+            probe.flush()
+    except OSError as exc:
+        raise RuntimeError(
+            f"SQLite temporary directory is not writable: {directory}: {exc}"
+        ) from exc
 
 
 def _init_recording_counts(conn: sqlite3.Connection):
@@ -175,6 +173,7 @@ def _init_recording_counts(conn: sqlite3.Connection):
 
 def init_db():
     """Inizializza schema DB (idempotente)."""
+    _verify_sqlite_temp_directory()
     conn = get_db()
     # WAL is persistent database state. Setting it once at startup avoids a
     # filesystem lock and journal probe on every request connection.
@@ -330,7 +329,7 @@ def init_db():
     """)
     _init_recording_counts(conn)
     conn.commit()
-    _keep_wal_open(conn)
+    conn.close()
     for thumbnail in legacy_thumbnails:
         try:
             os.unlink(thumbnail)

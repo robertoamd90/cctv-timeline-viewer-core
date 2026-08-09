@@ -134,22 +134,23 @@ def index_camera(
             """, prepared)
 
         missing_rows = conn.execute(
-            f"SELECT thumbnail_path FROM recordings WHERE {scope} "
+            f"SELECT id, thumbnail_path FROM recordings WHERE {scope} "
             "AND availability = 'available' AND last_seen IS NOT ?",
             (*scope_params, scan_marker),
         ).fetchall()
         missing_thumbnails = [row["thumbnail_path"] for row in missing_rows if row["thumbnail_path"]]
         if purge_missing:
-            conn.execute(
-                f"DELETE FROM recordings WHERE {scope} "
-                "AND availability = 'available' AND last_seen IS NOT ?",
-                (*scope_params, scan_marker),
+            # Keep each DELETE a single-row statement. A bulk DELETE combined
+            # with the availability-count trigger requires a SQLite statement
+            # journal, which may spill to an OS temporary file.
+            conn.executemany(
+                "DELETE FROM recordings WHERE id = ?",
+                ((row["id"],) for row in missing_rows),
             )
         else:
-            conn.execute(
-                f"UPDATE recordings SET availability = 'missing' "
-                f"WHERE {scope} AND availability = 'available' AND last_seen IS NOT ?",
-                (*scope_params, scan_marker),
+            conn.executemany(
+                "UPDATE recordings SET availability = 'missing' WHERE id = ?",
+                ((row["id"],) for row in missing_rows),
             )
         conn.execute(
             f"UPDATE recordings SET last_seen = ? WHERE {scope} AND last_seen IS ?",

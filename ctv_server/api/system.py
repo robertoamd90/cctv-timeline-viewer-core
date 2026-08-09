@@ -52,7 +52,9 @@ def update_stream_profiles(
 @router.post("/admin/rebuild-index")
 def rebuild_index(_: CurrentUser = Depends(require_admin)):
     try:
-        with maintenance_window():
+        # Enter maintenance first so no new watcher/UI scan can replace the
+        # one we are waiting for. This makes rebuild a reliable recovery path.
+        with maintenance_window(wait_for_jobs=True):
             # Remove hooks left by early v0.1.27 betas before deleting rows.
             with write_db() as conn:
                 recordings = conn.execute("SELECT COUNT(*) FROM recordings").fetchone()[0]
@@ -65,8 +67,18 @@ def rebuild_index(_: CurrentUser = Depends(require_admin)):
                 retire_recording_range_index(conn)
 
             with write_db() as conn:
-                conn.execute("DELETE FROM recordings")
-                conn.execute("DELETE FROM partitions")
+                recording_ids = conn.execute("SELECT id FROM recordings").fetchall()
+                conn.executemany(
+                    "DELETE FROM recordings WHERE id = ?",
+                    ((row["id"],) for row in recording_ids),
+                )
+                partition_ids = conn.execute(
+                    "SELECT camera_id, partition_key FROM partitions"
+                ).fetchall()
+                conn.executemany(
+                    "DELETE FROM partitions WHERE camera_id = ? AND partition_key = ?",
+                    ((row["camera_id"], row["partition_key"]) for row in partition_ids),
+                )
                 conn.execute("DELETE FROM camera_recording_counts")
                 conn.execute(
                     "UPDATE cameras SET source_status = 'unknown', source_error = NULL, "

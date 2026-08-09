@@ -206,6 +206,20 @@ class IndexerTests(unittest.TestCase):
 
 
 class MigrationTests(unittest.TestCase):
+    def test_configured_sqlite_temp_directory_is_write_probed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "not-present")
+            original = db.DB_PATH
+            db.DB_PATH = os.path.join(tmp, "ctv.db")
+            try:
+                with patch.dict(os.environ, {"SQLITE_TMPDIR": missing}):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "SQLite temporary directory is not writable"
+                    ):
+                        db.init_db()
+            finally:
+                db.DB_PATH = original
+
     def test_poc_database_is_migrated(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "legacy.db")

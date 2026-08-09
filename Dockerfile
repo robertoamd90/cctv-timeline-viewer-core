@@ -25,6 +25,8 @@ RUN mkdir -p /root/.ctv /data
 ENV CTV_DB=/root/.ctv/ctv.db
 ENV CTV_THUMBNAILS=/root/.ctv/thumbnails
 ENV CTV_WEB_ROOT=/app/ctv_web
+ENV SQLITE_TMPDIR=/tmp
+ENV TMPDIR=/tmp
 
 EXPOSE 8000
 

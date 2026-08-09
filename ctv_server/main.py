@@ -39,7 +39,11 @@ class VideoFileResponse(FileResponse):
     def __init__(self, path, *, expected_duration=None, **kwargs):
         stat_result = kwargs.get("stat_result") or os.stat(path)
         kwargs["stat_result"] = stat_result
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("Cache-Control", "private, no-store")
+        kwargs["headers"] = headers
         super().__init__(path, **kwargs)
+        self._file_size = stat_result.st_size
         self._duration_patches = ()
         if expected_duration and self.media_type == "video/mp4":
             self._duration_patches = file_duration_patches(
@@ -47,6 +51,21 @@ class VideoFileResponse(FileResponse):
             )
 
     async def __call__(self, scope, receive, send):
+        # A rebuilt database can reuse recording IDs. Browsers may retain a
+        # byte offset for the former file and send a now-impossible Range.
+        # Drop only an unsatisfiable starting offset so the client can reload
+        # the current file from byte zero instead of remaining stuck on 416.
+        request_headers = list(scope.get("headers", []))
+        range_value = next(
+            (value for key, value in request_headers if key.lower() == b"range"), b""
+        ).decode("latin-1")
+        range_match = re.fullmatch(r"bytes=(\d+)-(?:\d*)", range_value.strip())
+        if range_match and int(range_match.group(1)) >= self._file_size:
+            scope = dict(scope)
+            scope["headers"] = [
+                (key, value) for key, value in request_headers
+                if key.lower() not in {b"range", b"if-range"}
+            ]
         if not self._duration_patches:
             return await super().__call__(scope, receive, send)
 

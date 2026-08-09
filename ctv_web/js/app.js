@@ -40,6 +40,7 @@ const S = {
   hotspotSideRows: 1,
   hotspotMobile: false,
   loadingPartitions: 0,
+  partitionProgress: {},
   indexNeedsReload: false,
 };
 
@@ -649,6 +650,7 @@ async function scanCam(id) {
     if (camera?.indexing_mode === 'partitioned') {
       const range = selectedDayRange();
       if (!range) throw new Error(t('cameras.selectDayFirst'));
+      clearPartitionProgress(id);
       const result = await api(
         `/api/timeline/prepare?from=${range[0]}&to=${range[1]}&cameras=${id}`,
         { method: 'POST' },
@@ -789,6 +791,8 @@ async function loadTimeline(from, to, prepare = true) {
     }
     const cameraQuery = S.visibleCameraIds.length ? S.visibleCameraIds.join(',') : '';
     if (prepare && from != null && to != null) {
+      S.partitionProgress = {};
+      S.loadingPartitions = 0;
       const result = await api(
         `/api/timeline/prepare?from=${from}&to=${to}&cameras=${cameraQuery}`,
         { method: 'POST' },
@@ -1009,9 +1013,10 @@ evtSource.addEventListener('partition', e => {
   const status = document.getElementById('topbar-status');
   if (data.status === 'started') {
     status.textContent = t('timeline.loadingPartition', {partition: data.partition});
-    updateTimelinePartitionState(data.camera_id, 'scanning', 0, 0);
+    recordPartitionProgress(data);
   } else if (['done', 'missing', 'error'].includes(data.status)) {
-    S.loadingPartitions = Math.max(0, S.loadingPartitions - 1);
+    const progress = recordPartitionProgress(data, true);
+    if (!progress.wasFinished) S.loadingPartitions = Math.max(0, S.loadingPartitions - 1);
     status.textContent = data.status === 'error' ? t('cameras.sourceError') : t('status.ready');
     if (data.status === 'error') toast(localizeMessage(data.error), 'error');
     loadTimeline(undefined, undefined, false);
@@ -1020,10 +1025,25 @@ evtSource.addEventListener('partition', e => {
 });
 evtSource.addEventListener('partition_progress', e => {
   const data = JSON.parse(e.data);
-  updateTimelinePartitionState(data.camera_id, 'scanning', data.done, data.total);
+  const progress = recordPartitionProgress(data);
   document.getElementById('topbar-status').textContent =
-    t('timeline.progress', {partition: data.partition, done: data.done, total: data.total});
+    t('timeline.loading', {done: progress.done, total: progress.total});
 });
+
+function clearPartitionProgress(cameraId) {
+  const prefix = `${cameraId}:`;
+  Object.keys(S.partitionProgress).forEach(key => {
+    if (key.startsWith(prefix)) delete S.partitionProgress[key];
+  });
+}
+
+function recordPartitionProgress(data, finished = false) {
+  const progress = CtvMedia.aggregatePartitionProgress(S.partitionProgress, data, finished);
+  updateTimelinePartitionState(
+    data.camera_id, 'scanning', progress.cameraDone, progress.cameraTotal,
+  );
+  return progress;
+}
 
 function updateTimelinePartitionState(cameraId, state, done, total) {
   const camera = S.timeline?.cameras.find(item => item.camera_id === cameraId);
@@ -1122,6 +1142,7 @@ document.getElementById('btn-scan-all').onclick = async () => {
   try {
     const range = selectedDayRange();
     if (range) {
+      S.partitionProgress = {};
       const result = await api(
         `/api/timeline/prepare?from=${range[0]}&to=${range[1]}&cameras=${S.visibleCameraIds.join(',')}`,
         { method: 'POST' },
@@ -1144,6 +1165,7 @@ document.getElementById('btn-rebuild-index').onclick = async () => {
     S.currentTime = null;
     S.zoomRange = null;
     S.loadingPartitions = 0;
+    S.partitionProgress = {};
     S.indexNeedsReload = true;
     renderTimeline();
     renderPlayers();

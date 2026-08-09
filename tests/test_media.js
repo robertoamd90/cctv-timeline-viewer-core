@@ -14,6 +14,7 @@ const {
   mediaTimeForTimeline,
   timelineTimeForMedia,
   medianTime,
+  aggregatePartitionProgress,
 } = require('../ctv_web/js/media.js');
 const playerSource = fs.readFileSync(require.resolve('../ctv_web/js/player.js'), 'utf8');
 const timelineSource = fs.readFileSync(require.resolve('../ctv_web/js/timeline.js'), 'utf8');
@@ -23,6 +24,36 @@ assert.equal(medianTime([12]), 12);
 assert.equal(medianTime([14, 10, 12]), 12);
 assert.equal(medianTime([14, 10, 12, 20]), 13);
 assert.equal(medianTime([NaN, 12, Infinity, 14]), 13);
+
+const partitionProgress = {};
+assert.deepEqual(
+  aggregatePartitionProgress(partitionProgress, {
+    camera_id: 1, partition: '2026-08-08', done: 40, total: 100,
+  }),
+  {done: 40, total: 100, cameraDone: 40, cameraTotal: 100, wasFinished: false},
+);
+assert.equal(
+  aggregatePartitionProgress(partitionProgress, {
+    camera_id: 2, partition: '2026-08-08', done: 10, total: 50,
+  }).done,
+  50,
+  'progress from parallel cameras must be added instead of replacing the displayed count',
+);
+assert.equal(
+  aggregatePartitionProgress(partitionProgress, {
+    camera_id: 1, partition: '2026-08-08', done: 20, total: 100,
+  }).done,
+  50,
+  'a delayed progress event must never move the aggregate count backwards',
+);
+const finishedPartition = aggregatePartitionProgress(partitionProgress, {
+  camera_id: 2, partition: '2026-08-08', done: 0, total: 0,
+}, true);
+assert.equal(finishedPartition.done, 90);
+assert.equal(finishedPartition.wasFinished, false);
+assert.equal(aggregatePartitionProgress(partitionProgress, {
+  camera_id: 2, partition: '2026-08-08',
+}, true).wasFinished, true, 'duplicate terminal events must be identifiable');
 
 assert.equal(safeSeekTarget(110, 100, NaN), 10);
 assert.equal(safeSeekTarget(110, 100, 8), 7.95);
@@ -113,6 +144,7 @@ assert.match(playerSource, /readyState < HTMLMediaElement\.HAVE_CURRENT_DATA/);
 assert.match(playerSource, /target > 0\.05/);
 assert.match(playerSource, /streamTransport === 'mp4'\) return true/);
 assert(playerSource.includes('/stream/${rec.id}'));
+assert(playerSource.includes('/video/${rec.id}?v=${_nativeMediaCacheToken}'));
 assert(playerSource.includes("canPlayType('application/vnd.apple.mpegurl')"));
 assert.match(playerSource, /navigator\.maxTouchPoints > 0/);
 assert.match(playerSource, /if \(!mobilePlayback\) return false/);

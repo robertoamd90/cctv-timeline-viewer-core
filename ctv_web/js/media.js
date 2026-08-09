@@ -207,6 +207,34 @@
     return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
   }
 
+  function aggregatePartitionProgress(progress, data, finished = false) {
+    const key = `${data.camera_id}:${data.partition || ''}`;
+    const previous = progress[key] || {
+      camera_id: data.camera_id, done: 0, total: 0, finished: false,
+    };
+    const total = Math.max(previous.total, Number(data.total) || 0);
+    const reportedDone = Number(data.done) || 0;
+    const done = finished && total > 0
+      ? total
+      : Math.max(previous.done, Math.min(reportedDone, total || Infinity));
+    progress[key] = {
+      camera_id: data.camera_id,
+      done,
+      total,
+      finished: previous.finished || finished,
+    };
+
+    const entries = Object.values(progress);
+    const cameraEntries = entries.filter(item => item.camera_id === data.camera_id);
+    return {
+      done: entries.reduce((sum, item) => sum + item.done, 0),
+      total: entries.reduce((sum, item) => sum + item.total, 0),
+      cameraDone: cameraEntries.reduce((sum, item) => sum + item.done, 0),
+      cameraTotal: cameraEntries.reduce((sum, item) => sum + item.total, 0),
+      wasFinished: previous.finished,
+    };
+  }
+
   return {
     safeSeekTarget,
     playbackCompleted,
@@ -221,5 +249,6 @@
     mediaTimeForTimeline,
     timelineTimeForMedia,
     medianTime,
+    aggregatePartitionProgress,
   };
 });

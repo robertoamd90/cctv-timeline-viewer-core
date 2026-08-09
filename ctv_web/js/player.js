@@ -6,6 +6,7 @@ let _clockStartTime = null, _clockStartWall = null, _tickId = null;
 let _playerCache = {};  // camId → {recId, sourceKey}
 let _wasBuffering = false;
 let _lastPlaybackUiUpdate = 0;
+const _nativeMediaCacheToken = Date.now().toString(36);
 
 function playerSourceKey(rec) {
   if (!rec) return '';
@@ -256,7 +257,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
       }
     } else {
       cell.dataset.streamTransport = 'native';
-      v.src = appUrl(`/video/${rec.id}`);
+      v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}`);
     }
     v.load();
   } else {

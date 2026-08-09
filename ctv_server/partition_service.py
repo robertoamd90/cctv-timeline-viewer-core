@@ -286,7 +286,8 @@ def _prepare_partitions(
             in_progress = row["status"] in {"queued", "scanning"}
             if stale and not in_progress and not _lock_for(camera_id, key).locked():
                 conn.execute(
-                    "UPDATE partitions SET status = 'queued' "
+                    "UPDATE partitions SET status = 'queued', error = NULL, "
+                    "progress_done = 0, progress_total = 0 "
                     "WHERE camera_id = ? AND partition_key = ?",
                     (camera_id, key),
                 )

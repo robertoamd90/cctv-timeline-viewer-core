@@ -1,6 +1,8 @@
 import os
 import re
 import hashlib
+import logging
+import math
 import subprocess
 import json
 from typing import Optional
@@ -9,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".ts", ".h264", ".h265", ".dav"}
+log = logging.getLogger("ctv.ffprobe")
 
 # Regex per estrarre timestamp da nomi file come:
 #   CAM-Esterno_00_20260706002901.mp4
@@ -81,16 +84,51 @@ def get_ffprobe_data(filepath: str) -> dict:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "ffprobe", "-v", "error", "-print_format", "json",
                 "-show_format", "-show_streams", filepath,
             ],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
+            detail = (result.stderr or "unknown ffprobe error").strip()[-500:]
+            log.warning(
+                "ffprobe failed for %s (exit %d): %s",
+                os.path.basename(filepath), result.returncode, detail,
+            )
             return {}
         return json.loads(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    except FileNotFoundError:
+        log.error("ffprobe executable is unavailable")
         return {}
+    except subprocess.TimeoutExpired:
+        log.warning("ffprobe timed out for %s", os.path.basename(filepath))
+        return {}
+    except json.JSONDecodeError as exc:
+        log.warning("ffprobe returned invalid JSON for %s: %s", os.path.basename(filepath), exc)
+        return {}
+
+
+def _positive_float(value) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return parsed if math.isfinite(parsed) and parsed > 0 else 0.0
+
+
+def _stream_duration(stream: dict) -> float:
+    direct = _positive_float(stream.get("duration"))
+    if direct:
+        return direct
+    duration_ts = _positive_float(stream.get("duration_ts"))
+    time_base = stream.get("time_base", "")
+    try:
+        numerator, denominator = (float(part) for part in time_base.split("/", 1))
+    except (TypeError, ValueError):
+        return 0.0
+    if not duration_ts or denominator <= 0:
+        return 0.0
+    return _positive_float(duration_ts * numerator / denominator)
 
 
 def parse_ffprobe(probe: dict) -> dict:
@@ -102,8 +140,11 @@ def parse_ffprobe(probe: dict) -> dict:
             video_stream = stream
             break
 
+    duration = _positive_float(fmt.get("duration"))
+    if not duration and video_stream:
+        duration = _stream_duration(video_stream)
     info = {
-        "duration": float(fmt.get("duration", 0)),
+        "duration": duration,
         "codec": video_stream.get("codec_name", "") if video_stream else "",
         "resolution": f"{video_stream.get('width', 0)}x{video_stream.get('height', 0)}" if video_stream else "",
         "fps": 0.0,
@@ -114,8 +155,11 @@ def parse_ffprobe(probe: dict) -> dict:
     if video_stream:
         fps_str = video_stream.get("r_frame_rate", "0/1")
         if "/" in fps_str:
-            num, den = fps_str.split("/")
-            info["fps"] = float(num) / float(den) if float(den) != 0 else 0.0
+            try:
+                num, den = fps_str.split("/")
+                info["fps"] = _positive_float(float(num) / float(den)) if float(den) != 0 else 0.0
+            except (TypeError, ValueError):
+                info["fps"] = 0.0
 
     # Timestamp dai metadati
     tags = fmt.get("tags", {})

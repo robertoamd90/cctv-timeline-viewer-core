@@ -106,6 +106,42 @@ class PartitionIndexTests(unittest.TestCase):
         self.assertEqual([job["key"] for job in jobs], ["2026-07-12"])
         self.assertEqual(jobs[0]["path"], str(next_day))
 
+    def test_missing_future_partition_does_not_show_stale_file_progress(self):
+        tz = ZoneInfo("Europe/Rome")
+        future = datetime(2030, 7, 11, 0, 0, tzinfo=tz)
+        key = "2030-07-11"
+        conn = db.get_db()
+        conn.execute(
+            """
+            INSERT INTO partitions (
+                camera_id, partition_key, path, status, last_scanned,
+                progress_done, progress_total
+            ) VALUES (?, ?, ?, 'error', 1, 37, 100)
+            """,
+            (self.camera_id, key, str(self.root / "2030" / "07" / "11")),
+        )
+        conn.commit()
+        conn.close()
+
+        jobs = prepare_partitions(
+            [self.camera_id], future.timestamp(), future.timestamp() + 86400,
+        )
+        self.assertEqual(len(jobs), 1)
+        pending = get_timeline(
+            future.timestamp(), future.timestamp() + 86400, str(self.camera_id),
+        )["cameras"][0]
+        self.assertEqual(pending["partition_status"], "scanning")
+        self.assertEqual(pending["progress_done"], 0)
+        self.assertEqual(pending["progress_total"], 0)
+
+        run_partition_scan(self.camera_id, jobs[0]["key"], jobs[0]["path"])
+        missing = get_timeline(
+            future.timestamp(), future.timestamp() + 86400, str(self.camera_id),
+        )["cameras"][0]
+        self.assertEqual(missing["partition_status"], "missing")
+        self.assertEqual(missing["progress_done"], 0)
+        self.assertEqual(missing["progress_total"], 0)
+
     def test_timeline_preparation_waits_for_concurrent_writer(self):
         writer_started = threading.Event()
         release_writer = threading.Event()

@@ -35,6 +35,10 @@
 
 ### Timeline rendering
 
+- Aggregate progress across simultaneous camera partitions and keep each
+  counter monotonic when delayed events arrive out of order.
+- Reset progress before retrying a partition, so a missing future day cannot
+  briefly display file counts left by an earlier failed scan.
 - Index recording intervals in the browser for fast visible-window and Auto
   Hotspot selection on densely populated timelines.
 - Cache the overview canvas, delegate segment hover handling, coalesce panning
@@ -44,6 +48,11 @@
 
 ### Indexing efficiency and validation
 
+- Recover video duration from stream metadata when the container omits it and
+  report ffprobe failures instead of silently indexing zero-length segments.
+- Bust native-video URLs after a reload and recover from stale browser byte
+  ranges when rebuilt databases reuse recording IDs, preventing persistent 416
+  playback failures.
 - Reconcile missing recordings with set-based SQL, bound concurrent metadata
   probes and scan directories through `scandir` to reduce CPU, memory and
   database work on large sources.

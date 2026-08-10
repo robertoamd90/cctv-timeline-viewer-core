@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from ctv_server import db
@@ -13,6 +14,7 @@ from ctv_server.models import StreamProfileConfig, StreamProfilesUpdate
 from ctv_server.streaming import (
     build_hls_command,
     build_transcode_command,
+    cancel_hls_job,
     ensure_hls_playlist,
     hls_playlist_contents,
     hls_segment,
@@ -89,6 +91,19 @@ class TranscodeCommandTests(unittest.TestCase):
         self.assertEqual(command[command.index("-b:v") + 1], "500k")
         self.assertEqual(command[command.index("-ss") + 1], "3.250")
         self.assertNotIn("-skip_frame", command)
+        self.assertNotIn("-readrate", command)
+        self.assertEqual(command.count("-threads"), 2)
+        self.assertTrue(all(
+            command[index + 1] == "1"
+            for index, value in enumerate(command) if value == "-threads"
+        ))
+        self.assertEqual(command[command.index("-filter_threads") + 1], "1")
+
+    def test_hls_is_paced_slightly_ahead_of_timeline_consumption(self):
+        with patch.object(streaming, "_HLS_READRATE_FACTOR", 1.5):
+            command = build_hls_command("/video/input.mp4", self.profile, 0, 4, "/tmp/hls")
+        self.assertEqual(command[command.index("-readrate") + 1], "6")
+        self.assertLess(command.index("-readrate"), command.index("-i"))
 
     def test_high_speed_boundary_start_uses_keyframes_only(self):
         command = build_transcode_command("/video/input.mp4", self.profile, 0, 16)
@@ -228,6 +243,64 @@ class TranscodeCommandTests(unittest.TestCase):
             with patch.object(streaming, "_TRANSCODE_IDLE_TIMEOUT", 0.01):
                 await streaming._stop_idle_transcode(process, last_delivery)
             self.assertTrue(process.terminated)
+
+        asyncio.run(scenario())
+
+    def test_abandoned_hls_transcode_is_terminated_while_still_running(self):
+        class FakeProcess:
+            returncode = None
+            terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                job_id = "fedcba9876543210fedcba9876543210"
+                process = FakeProcess()
+                job = streaming.HlsJob(
+                    (), Path(tmp), Path(tmp) / "ffmpeg.log", process, 0.0, 0.0,
+                )
+                streaming._hls_jobs[job_id] = job
+                with patch.object(streaming, "_HLS_ACTIVE_IDLE_TIMEOUT", 0.01):
+                    await streaming._expire_hls_job(job_id)
+                self.assertTrue(process.terminated)
+                self.assertNotIn(job_id, streaming._hls_jobs)
+
+        asyncio.run(scenario())
+
+    def test_hls_job_can_be_cancelled_explicitly(self):
+        class FakeProcess:
+            returncode = None
+            terminated = False
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                job_id = "abcdef0123456789abcdef0123456789"
+                process = FakeProcess()
+                streaming._hls_jobs[job_id] = streaming.HlsJob(
+                    (), Path(tmp), Path(tmp) / "ffmpeg.log", process, 0.0, 0.0,
+                )
+                self.assertTrue(await cancel_hls_job(job_id))
+                self.assertTrue(process.terminated)
+                self.assertNotIn(job_id, streaming._hls_jobs)
 
         asyncio.run(scenario())
 

@@ -17,6 +17,11 @@ from ctv_server import db
 PROFILE_NAMES = ("balanced", "fast")
 _MAX_TRANSCODERS = max(0, int(os.environ.get("CTV_MAX_TRANSCODERS", "0")))
 _transcode_slots = asyncio.Semaphore(_MAX_TRANSCODERS) if _MAX_TRANSCODERS else None
+_TRANSCODE_THREADS = max(1, int(os.environ.get("CTV_TRANSCODE_THREADS", "1")))
+_HLS_READRATE_FACTOR = max(1.0, float(os.environ.get("CTV_HLS_READRATE_FACTOR", "1.5")))
+_HLS_ACTIVE_IDLE_TIMEOUT = max(
+    10.0, float(os.environ.get("CTV_HLS_ACTIVE_IDLE_TIMEOUT", "30")),
+)
 _HLS_ROOT = Path(os.environ.get(
     "CTV_HLS_ROOT", os.path.join(tempfile.gettempdir(), "ctv-hls"),
 ))
@@ -38,6 +43,7 @@ class HlsJob:
     last_access: float
     started_at: float
     started_logged: bool = False
+    cancelled: bool = False
 
 
 _hls_jobs: dict[str, HlsJob] = {}
@@ -115,6 +121,7 @@ def _encoding_command(
     profile: dict,
     start_seconds: float,
     speed: float,
+    pace_for_playback: bool = False,
 ) -> list[str]:
     scale = profile["scale_percent"] / 100
     fps = profile["fps"]
@@ -133,15 +140,24 @@ def _encoding_command(
         if speed >= 8 and start_seconds < 0.5
         else []
     )
+    readrate_options = (
+        ["-readrate", f"{speed * _HLS_READRATE_FACTOR:g}"]
+        if pace_for_playback else []
+    )
     return [
         "ffmpeg",
         "-nostdin",
         "-hide_banner",
         "-loglevel",
         "error",
+        "-filter_threads",
+        "1",
         "-ss",
         f"{start_seconds:.3f}",
+        *readrate_options,
         *decode_options,
+        "-threads",
+        str(_TRANSCODE_THREADS),
         "-i",
         filepath,
         "-map",
@@ -153,6 +169,8 @@ def _encoding_command(
         video_filter,
         "-c:v",
         "libx264",
+        "-threads",
+        str(_TRANSCODE_THREADS),
         "-preset",
         preset,
         "-tune",
@@ -203,7 +221,9 @@ def build_hls_command(
 ) -> list[str]:
     directory = Path(output_dir)
     return [
-        *_encoding_command(filepath, profile, start_seconds, speed),
+        *_encoding_command(
+            filepath, profile, start_seconds, speed, pace_for_playback=True,
+        ),
         "-hls_time",
         "1",
         "-hls_list_size",
@@ -265,7 +285,24 @@ async def _expire_hls_job(job_id: str):
     job = _hls_jobs.get(job_id)
     if not job:
         return
+    while job.process.returncode is None and not job.cancelled:
+        idle_for = time.monotonic() - job.last_access
+        if idle_for >= _HLS_ACTIVE_IDLE_TIMEOUT:
+            job.cancelled = True
+            await _stop_process(job.process)
+            log.info(
+                "Stopped abandoned HLS session %s after %.1fs without requests",
+                job_id[:8], idle_for,
+            )
+            break
+        await asyncio.sleep(min(1.0, _HLS_ACTIVE_IDLE_TIMEOUT - idle_for))
     await job.process.wait()
+    if job.cancelled:
+        async with _hls_lock:
+            if _hls_jobs.get(job_id) is job:
+                _hls_jobs.pop(job_id, None)
+        shutil.rmtree(job.directory, ignore_errors=True)
+        return
     if job.process.returncode:
         log.warning(
             "HLS session %s failed: %s",
@@ -295,6 +332,20 @@ async def _expire_hls_job(job_id: str):
             _hls_jobs.pop(job_id, None)
         shutil.rmtree(job.directory, ignore_errors=True)
         return
+
+
+async def cancel_hls_job(job_id: str) -> bool:
+    if not _HLS_ID_PATTERN.fullmatch(job_id):
+        return False
+    async with _hls_lock:
+        job = _hls_jobs.pop(job_id, None)
+        if not job:
+            return False
+        job.cancelled = True
+    await _stop_process(job.process)
+    shutil.rmtree(job.directory, ignore_errors=True)
+    log.info("Cancelled HLS session %s", job_id[:8])
+    return True
 
 
 async def ensure_hls_playlist(
@@ -341,8 +392,10 @@ async def ensure_hls_playlist(
             )
             _hls_jobs[job_id] = job
             log.info(
-                "Starting HLS session %s profile=%s speed=%gx offset=%.3fs",
+                "Starting HLS session %s profile=%s speed=%gx offset=%.3fs "
+                "threads=%d readrate=%gx",
                 job_id[:8], profile["name"], speed, start_seconds,
+                _TRANSCODE_THREADS, speed * _HLS_READRATE_FACTOR,
             )
             task = asyncio.create_task(_expire_hls_job(job_id))
             _hls_tasks.add(task)

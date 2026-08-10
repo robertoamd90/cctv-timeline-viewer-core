@@ -64,6 +64,10 @@ jobs:
           assert app["environment"]["SQLITE_TMPDIR"] == "/tmp"
           assert beta["environment"]["SQLITE_TMPDIR"] == "/tmp"
           assert app["environment"]["TMPDIR"] == "/tmp"
+          assert app["environment"]["CTV_TRANSCODE_THREADS"] == "1"
+          assert beta["environment"]["CTV_TRANSCODE_THREADS"] == "1"
+          assert app["environment"]["CTV_HLS_READRATE_FACTOR"] == "1.5"
+          assert beta["environment"]["CTV_HLS_ACTIVE_IDLE_TIMEOUT"] == "30"
           assert any(item.get("type") == "media" and item.get("read_only") for item in app["map"])
           with open("addons/cctv_viewer/apparmor.txt", encoding="utf-8") as handle:
               apparmor = handle.read()

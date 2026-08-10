@@ -35,7 +35,10 @@
     "CTV_SOURCE_ROOTS": "/media",
     "CTV_TRUSTED_PROXIES": "172.30.32.2",
     "SQLITE_TMPDIR": "/tmp",
-    "TMPDIR": "/tmp"
+    "TMPDIR": "/tmp",
+    "CTV_TRANSCODE_THREADS": "1",
+    "CTV_HLS_READRATE_FACTOR": "1.5",
+    "CTV_HLS_ACTIVE_IDLE_TIMEOUT": "30"
   },
   "watchdog": "http://[HOST]:[PORT:8000]/api/health",
   "backup": "cold",

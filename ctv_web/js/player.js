@@ -53,6 +53,18 @@ function streamSessionId() {
     .map(value => value.toString(16).padStart(2, '0')).join('');
 }
 
+function cancelHlsSource(video) {
+  const jobId = video?.parentElement?.dataset.hlsJob;
+  if (!jobId) return;
+  video.parentElement.dataset.hlsJob = '';
+  video.parentElement.dataset.hlsCancelled = '1';
+  fetch(appUrl(`/hls/${jobId}`), {method: 'DELETE', keepalive: true}).catch(() => {});
+}
+
+function hasCancelledHlsSources() {
+  return getVideos().some(video => video.parentElement.dataset.hlsCancelled === '1');
+}
+
 function seekVideo(video) {
   if (S.currentTime == null || video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
   const target = videoTargetTime(video);
@@ -80,7 +92,11 @@ function renderPlayers(forceReload = false) {
   // Rimuovi celle per camere rimosse
   area.querySelectorAll('.player-cell').forEach(cell => {
     const cid = parseInt(cell.dataset.cam);
-    if (!camIds.includes(cid)) { delete _playerCache[cid]; cell.remove(); }
+    if (!camIds.includes(cid)) {
+      cancelHlsSource(cell.querySelector('video'));
+      delete _playerCache[cid];
+      cell.remove();
+    }
   });
 
   // Crea/aggiorna celle per ogni camera
@@ -138,6 +154,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v = cell.querySelector('video');
     v.playsInline = true;
   }
+  cancelHlsSource(v);
+  cell.dataset.hlsJob = '';
   cell.querySelector('.label-overlay').textContent = name;
   cell.querySelector('.hotspot-action').textContent = t('player.bringToFront');
   const empty = cell.querySelector('.empty-state');
@@ -249,14 +267,19 @@ function updatePlayerCell(cell, cam, rec, cid) {
       });
       if (supportsNativeHls(v)) {
         query.set('recording_id', String(rec.id));
+        const jobId = streamSessionId();
         cell.dataset.streamTransport = 'hls';
-        v.src = appUrl(`/hls/${streamSessionId()}/index.m3u8?${query}`);
+        cell.dataset.hlsJob = jobId;
+        cell.dataset.hlsCancelled = '0';
+        v.src = appUrl(`/hls/${jobId}/index.m3u8?${query}`);
       } else {
         cell.dataset.streamTransport = 'mp4';
+        cell.dataset.hlsCancelled = '0';
         v.src = appUrl(`/stream/${rec.id}?${query}`);
       }
     } else {
       cell.dataset.streamTransport = 'native';
+      cell.dataset.hlsCancelled = '0';
       v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}`);
     }
     v.load();
@@ -270,6 +293,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     cell.dataset.duration = '';
     cell.dataset.profile = '';
     cell.dataset.streamTransport = '';
+    cell.dataset.hlsCancelled = '0';
     cell.dataset.transitioning = '';
     cell.dataset.buffering = '0';
     cell.dataset.failed = '0';
@@ -612,6 +636,9 @@ function stopPlayback() {
   S.playing = false;
   _wasBuffering = false;
   getVideos().forEach(v => {
+    if (v.parentElement.dataset.streamTransport === 'hls') {
+      cancelHlsSource(v);
+    }
     v.dataset.warming = '0';
     clearFreezeFrame(v);
     v.pause();
@@ -631,6 +658,7 @@ document.getElementById('btn-play').onclick = () => {
     toast(t('player.noneForDay'), 'error');
     return;
   }
+  if (hasCancelledHlsSources()) renderPlayers(true);
   S.playing = true; updatePlayButton();
   enterBufferingBarrier(null, null);
   startClock();
@@ -679,6 +707,24 @@ document.getElementById('preload-select').onchange = function() {
   localStorage.setItem('ctv-preload-mode', S.preloadMode);
   reloadPlaybackStreams();
 };
+
+window.addEventListener('pagehide', () => {
+  getVideos().forEach(video => {
+    if (video.parentElement.dataset.streamTransport === 'hls') {
+      cancelHlsSource(video);
+    }
+  });
+});
+
+window.addEventListener('pageshow', event => {
+  if (!event.persisted || !hasCancelledHlsSources()) return;
+  const wasPlaying = S.playing;
+  renderPlayers(true);
+  if (wasPlaying) {
+    enterBufferingBarrier(null, null);
+    startClock();
+  }
+});
 
 function updatePlayButton() {
   const button = document.getElementById('btn-play');

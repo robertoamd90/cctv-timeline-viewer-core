@@ -15,6 +15,7 @@ from ctv_server.auth import user_from_request
 from ctv_server.config import is_home_assistant, trusted_ingress_proxies
 from ctv_server.mp4 import file_duration_patches, patch_chunk
 from ctv_server.streaming import (
+    cancel_hls_job,
     ensure_hls_playlist,
     hls_playlist_contents,
     get_stream_profiles,
@@ -270,6 +271,12 @@ def serve_hls_segment(job_id: str, filename: str):
         media_type="video/mp2t",
         headers={"Cache-Control": "private, max-age=300"},
     )
+
+
+@app.delete("/hls/{job_id}", status_code=204)
+async def cancel_hls(job_id: str):
+    await cancel_hls_job(job_id)
+    return Response(status_code=204)
 
 
 # ── Frontend statico ──

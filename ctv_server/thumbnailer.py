@@ -14,9 +14,11 @@ def generate_thumbnail(recording_id: int, filepath: str, width: int = 320) -> Op
     try:
         subprocess.run(
             [
-                "ffmpeg", "-y", "-ss", "1", "-i", filepath,
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-y", "-filter_threads", "1", "-ss", "1",
+                "-threads", "1", "-i", filepath,
                 "-vframes", "1", "-vf", f"scale={width}:-1",
-                "-q:v", "3", out_path,
+                "-threads", "1", "-q:v", "3", out_path,
             ],
             capture_output=True, check=True, timeout=30,
         )

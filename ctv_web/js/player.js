@@ -6,6 +6,13 @@ let _clockStartTime = null, _clockStartWall = null, _tickId = null;
 let _playerCache = {};  // camId → {recId, sourceKey}
 let _wasBuffering = false;
 let _lastPlaybackUiUpdate = 0;
+let _recoveryStarted = null;
+let _playbackEpoch = 0;
+const _pendingReleases = new Set();
+const playbackDiagnostics = {bufferingMs: 0, recoveries: 0, restarts: 0, firstFrames: []};
+window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
+  firstFrames: playbackDiagnostics.firstFrames.slice(),
+  bufferingMs: playbackDiagnostics.bufferingMs + (_recoveryStarted == null ? 0 : performance.now() - _recoveryStarted)});
 const _nativeMediaCacheToken = Date.now().toString(36);
 
 function playerSourceKey(rec) {
@@ -54,11 +61,100 @@ function streamSessionId() {
 }
 
 function cancelHlsSource(video) {
-  const jobId = video?.parentElement?.dataset.hlsJob;
+  if (!video) return;
+  clearTimeout(video._pauseTimer);
+  video._generation = (video._generation || 0) + 1;
+  const jobId = video.parentElement?.dataset.transcodeJob || video.parentElement?.dataset.hlsJob;
+  video.pause();
+  video.onended = video.onwaiting = video.onstalled = video.onerror = null;
+  video.removeAttribute('src');
+  video.load();
   if (!jobId) return;
   video.parentElement.dataset.hlsJob = '';
+  video.parentElement.dataset.transcodeJob = '';
   video.parentElement.dataset.hlsCancelled = '1';
-  fetch(appUrl(`/hls/${jobId}`), {method: 'DELETE', keepalive: true}).catch(() => {});
+  const release = releasePlaybackSession(jobId);
+  _pendingReleases.add(release);
+  release.finally(() => _pendingReleases.delete(release));
+}
+
+async function releasePlaybackSession(jobId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    await fetch(appUrl(`/api/playback-sessions/${jobId}`), {method: 'DELETE', keepalive: true, signal: controller.signal});
+  } catch (_) { /* Server watchdogs cover a lost cancellation request. */ }
+  finally { clearTimeout(timer); }
+}
+
+function resetPlaybackRecovery() {
+  _playbackEpoch++;
+  finishRecovery();
+  getVideos().forEach(video => { video.dataset.recoveryAttempts = '0'; });
+  document.getElementById('playback-notice').hidden = true;
+}
+
+function finishRecovery() {
+  if (_recoveryStarted != null) playbackDiagnostics.bufferingMs += performance.now() - _recoveryStarted;
+  _recoveryStarted = null;
+}
+
+function failPlayback(code = 'recoveryFailed') {
+  stopPlayback(true);
+  const known = ['capacity', 'storage_limit', 'encoding', 'recoveryFailed', 'session_expired'];
+  document.getElementById('playback-notice-text').textContent = t(`player.${known.includes(code) ? code : 'unplayable'}`);
+  document.getElementById('playback-notice').hidden = false;
+}
+
+function schedulePausedRelease(video) {
+  clearTimeout(video._pauseTimer);
+  const generation = video._generation;
+  video._pauseTimer = setTimeout(() => {
+    if (!S.playing && video._generation === generation) {
+      const duration = Number(video.parentElement.dataset.duration);
+      if (video.parentElement.dataset.streamTransport === 'mp4' && Number.isFinite(duration) &&
+          duration > 0 && bufferedAheadAt(video, video.currentTime) >= duration - video.currentTime - 0.15) {
+        // A fully downloaded MP4 no longer needs a producer or network traffic.
+        // Keep its local buffer so a later Play does not encode it again.
+        return;
+      }
+      showFreezeFrame(video);
+      cancelHlsSource(video);
+    }
+  }, 2000);
+}
+
+async function loadCompressedSource(video, request, url) {
+  const generation = video._generation;
+  try {
+    // Wait for superseded sources to release their slots before admission.
+    await Promise.all([..._pendingReleases]);
+    if (generation !== video._generation) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    let response;
+    try {
+      response = await fetch(appUrl('/api/playback-sessions'), {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(request), signal: controller.signal,
+      });
+    } finally { clearTimeout(timer); }
+    if (generation !== video._generation) {
+      releasePlaybackSession(request.session_id);
+      return;
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      failPlayback(body.detail);
+      return;
+    }
+    video.src = url;
+    video.dataset.warming = '0';
+    video.load();
+    if (S.playing) enterBufferingBarrier(null, null);
+    else schedulePausedRelease(video);
+  } catch (_) {
+    if (generation === video._generation) failPlayback('unplayable');
+  }
 }
 
 function hasCancelledHlsSources() {
@@ -217,7 +313,16 @@ function updatePlayerCell(cell, cam, rec, cid) {
       v.dataset.metadataReady = '1';
       seekVideo(v);
     };
-    v.onloadeddata = () => clearStatusWhenReady(v);
+    const loadedAt = performance.now();
+    let firstFrame = true;
+    v.onloadeddata = () => {
+      if (firstFrame) {
+        firstFrame = false;
+        playbackDiagnostics.firstFrames.push({session: cell.dataset.transcodeJob || 'native', ms: performance.now() - loadedAt});
+        if (playbackDiagnostics.firstFrames.length > 64) playbackDiagnostics.firstFrames.shift();
+      }
+      clearStatusWhenReady(v);
+    };
     v.oncanplay = () => clearStatusWhenReady(v);
     v.onseeked = () => {
       v.dataset.driftSeek = '0';
@@ -242,24 +347,38 @@ function updatePlayerCell(cell, cam, rec, cid) {
         return;
       }
       const waitingRecording = v.dataset.recording;
+      const waitingSource = v.src;
+      const waitingEpoch = _playbackEpoch;
       setTimeout(() => {
         if (S.playing && v.dataset.recording === waitingRecording &&
+            v.src === waitingSource && waitingEpoch === _playbackEpoch &&
             v.dataset.driftSeek === '1' &&
             v.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
           enterBufferingBarrier(v, t('player.buffering'));
         }
       }, 250);
     };
-    v.onstalled = () => enterBufferingBarrier(v, t('player.slowSource'));
-    v.onerror = () => {
+    v.onstalled = () => {
+      if (!videoHasPlaybackBuffer(v)) enterBufferingBarrier(v, t('player.buffering'));
+    };
+    v.onerror = async () => {
+      const generation = v._generation;
+      const jobId = cell.dataset.transcodeJob;
+      const status = jobId ? await fetch(appUrl(`/api/playback-sessions/${jobId}`))
+        .then(response => response.json()).catch(() => ({})) : {};
+      if (v._generation !== generation) return;
       clearFreezeFrame(v);
       cell.dataset.failed = '1'; cell.dataset.buffering = '0';
       setPlayerStatus(cell, t('player.unplayable'), true);
+      failPlayback(status.reason || 'unplayable');
     };
     // This is a per-browser preference because preload behavior varies by
     // engine and connection. Browsers may still treat it as a hint.
     v.preload = S.preloadMode;
     if (plan.transcoded) {
+      const jobId = streamSessionId();
+      cell.dataset.transcodeJob = jobId;
+      cell.dataset.hlsCancelled = '0';
       const query = new URLSearchParams({
         profile: S.streamProfile,
         start: streamOffset.toFixed(3),
@@ -267,22 +386,33 @@ function updatePlayerCell(cell, cam, rec, cid) {
       });
       if (supportsNativeHls(v)) {
         query.set('recording_id', String(rec.id));
-        const jobId = streamSessionId();
         cell.dataset.streamTransport = 'hls';
         cell.dataset.hlsJob = jobId;
         cell.dataset.hlsCancelled = '0';
-        v.src = appUrl(`/hls/${jobId}/index.m3u8?${query}`);
+        cell.dataset.pendingUrl = appUrl(`/hls/${jobId}/index.m3u8?${query}`);
       } else {
         cell.dataset.streamTransport = 'mp4';
         cell.dataset.hlsCancelled = '0';
-        v.src = appUrl(`/stream/${rec.id}?${query}`);
+        query.set('session_id', jobId);
+        cell.dataset.pendingUrl = appUrl(`/stream/${rec.id}?${query}`);
       }
+      loadCompressedSource(v, {session_id: jobId, recording_id: rec.id, profile: S.streamProfile,
+        start: Number(streamOffset.toFixed(3)), speed: plan.streamSpeed, transport: cell.dataset.streamTransport}, cell.dataset.pendingUrl);
     } else {
       cell.dataset.streamTransport = 'native';
       cell.dataset.hlsCancelled = '0';
       v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}`);
     }
-    v.load();
+    if (!plan.transcoded) v.load();
+    const generation = v._generation;
+    const expectedSource = plan.transcoded ? cell.dataset.pendingUrl : v.src;
+    for (const event of ['onloadedmetadata', 'onloadeddata', 'oncanplay', 'onseeked', 'onplaying', 'onwaiting', 'onstalled', 'onerror', 'onended']) {
+      const handler = v[event];
+      v[event] = (...args) => {
+        if (v._generation === generation && v.src === expectedSource &&
+            (!v.currentSrc || v.currentSrc === expectedSource)) return handler?.(...args);
+      };
+    }
   } else {
     cell.dataset.recording = '';
     v.dataset.recording = '';
@@ -424,6 +554,7 @@ function updateAutoHotspot(previousTime, currentTime) {
 
 // ── Seek ──
 function seekPlayersToTime() {
+  resetPlaybackRecovery();
   if (S.streamProfile !== 'native') {
     renderPlayers(true);
     return;
@@ -503,7 +634,9 @@ function requiredBuffer(video, currentTime = video.currentTime) {
   // A transcoded stream already encodes the requested timeline speed. Buffer
   // demand depends on how quickly the browser consumes that stream, not on the
   // amount of source time represented by each encoded second.
-  return CtvMedia.requiredPlaybackBuffer(videoPlaybackRate(video), currentTime, expectedDuration);
+  return CtvMedia.requiredPlaybackBuffer(
+    videoPlaybackRate(video), currentTime, expectedDuration, _wasBuffering || !S.playing,
+  );
 }
 
 function videoReachedEnd(video) {
@@ -551,6 +684,10 @@ function absoluteVideoTime(video) {
 }
 
 function restartProgressiveVideo(video) {
+  const attempts = (Number(video.dataset.recoveryAttempts) || 0) + 1;
+  if (attempts > 3) { failPlayback(); return false; }
+  video.dataset.recoveryAttempts = String(attempts);
+  playbackDiagnostics.restarts++;
   const cell = video.parentElement;
   const cid = parseInt(cell.dataset.cam);
   const cam = S.cameras.find(camera => camera.id === cid);
@@ -561,6 +698,7 @@ function restartProgressiveVideo(video) {
     recId: rec ? String(rec.id) : '',
     sourceKey: playerSourceKey(rec),
   };
+  return true;
 }
 
 function enterBufferingBarrier(source, message) {
@@ -569,33 +707,37 @@ function enterBufferingBarrier(source, message) {
     setPlayerStatus(source.parentElement, message || t('player.buffering'));
   }
   if (!S.playing) return;
-  let videos = activeVideos();
-  const restartProgressiveStreams = videos.filter(video => {
-    if (video.parentElement.dataset.streamTransport !== 'mp4') return false;
-    const target = videoTargetTime(video);
-    const duration = parseFloat(video.parentElement.dataset.duration);
-    const remaining = Number.isFinite(duration) ? duration - target : Infinity;
-    return target > 0.1 && remaining > 0.5;
-  });
-  if (restartProgressiveStreams.length) {
-    restartProgressiveStreams.forEach(restartProgressiveVideo);
-    videos = activeVideos();
+  // Repeated waiting events belong to the same recovery. In particular, do
+  // not start playback again on a progressive stream already filling its buffer.
+  const alreadyBuffering = _wasBuffering;
+  if (!alreadyBuffering && _recoveryStarted == null) {
+    _recoveryStarted = performance.now();
+    playbackDiagnostics.recoveries++;
   }
+  _wasBuffering = true;
+  const videos = activeVideos();
   // S.currentTime is authoritative. A newly loaded video's currentTime is often
   // still zero here and must never be allowed to rewind the global clock.
   videos.forEach(video => {
+    if ((alreadyBuffering && video.dataset.warming === '1') ||
+        (video.parentElement.dataset.transcodeJob && !video.getAttribute('src'))) return;
+    video.pause();
     if (!videoHasPlaybackBuffer(video)) {
       video.dataset.warming = '1';
       showFreezeFrame(video);
       video.preload = 'auto';
       video.playbackRate = videoPlaybackRate(video);
-      video.play().catch(() => {});
+      // Established progressive streams continue downloading while paused.
+      // HLS needs playback to refresh its playlist; a new source still needs
+      // its initial play handshake. Real MP4 drift is handled by alignVideos.
+      if (video.parentElement.dataset.streamTransport !== 'mp4' ||
+          video.dataset.hasPlayed !== '1') {
+        video.play().catch(() => {});
+      }
     } else {
       video.dataset.warming = '0';
-      video.pause();
     }
   });
-  _wasBuffering = true;
   _clockStartTime = S.currentTime;
   _clockStartWall = performance.now();
 }
@@ -604,6 +746,7 @@ function alignVideos(videos) {
   let aligned = true;
   let restartedProgressiveStream = false;
   videos.forEach(video => {
+    if (!S.playing) { aligned = false; return; }
     const cell = video.parentElement;
     const start = parseFloat(cell.dataset.start);
     if (!Number.isFinite(start) || S.currentTime == null) return;
@@ -617,7 +760,7 @@ function alignVideos(videos) {
         const duration = parseFloat(cell.dataset.duration);
         const remaining = Number.isFinite(duration) ? duration - target : Infinity;
         if (remaining <= 0.5) return;
-        restartProgressiveVideo(video);
+        if (restartProgressiveVideo(video) === false) { aligned = false; return; }
         restartedProgressiveStream = true;
         aligned = false;
         return;
@@ -627,28 +770,35 @@ function alignVideos(videos) {
       aligned = false;
     }
   });
-  if (restartedProgressiveStream) enterBufferingBarrier(null, null);
+  if (restartedProgressiveStream && S.playing) {
+    _wasBuffering = false;
+    enterBufferingBarrier(null, null);
+  }
   return aligned;
 }
 
-function stopPlayback() {
+function stopPlayback(immediate = false) {
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   S.playing = false;
   _wasBuffering = false;
+  finishRecovery();
   getVideos().forEach(v => {
-    if (v.parentElement.dataset.streamTransport === 'hls') {
-      cancelHlsSource(v);
-    }
     v.dataset.warming = '0';
     clearFreezeFrame(v);
     v.pause();
     v.preload = S.preloadMode;
+    if (v.parentElement.dataset.transcodeJob) {
+      if (immediate) { showFreezeFrame(v); cancelHlsSource(v); }
+      else schedulePausedRelease(v);
+    }
   });
   updatePlayButton();
 }
 
 document.getElementById('btn-play').onclick = () => {
   if (S.playing) { stopPlayback(); return; }
+  resetPlaybackRecovery();
+  getVideos().forEach(video => clearTimeout(video._pauseTimer));
   if (S.currentTime == null && S.timeline) {
     const firstSeg = S.timeline.cameras[0]?.segments[0];
     if (firstSeg) S.currentTime = firstSeg.start_ts;
@@ -665,6 +815,7 @@ document.getElementById('btn-play').onclick = () => {
 };
 
 function reloadPlaybackStreams() {
+  resetPlaybackRecovery();
   const wasPlaying = S.playing;
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   _wasBuffering = false;
@@ -709,21 +860,14 @@ document.getElementById('preload-select').onchange = function() {
 };
 
 window.addEventListener('pagehide', () => {
-  getVideos().forEach(video => {
-    if (video.parentElement.dataset.streamTransport === 'hls') {
-      cancelHlsSource(video);
-    }
-  });
+  stopPlayback(true);
 });
 
+document.addEventListener('visibilitychange', () => { if (document.hidden) stopPlayback(true); });
+document.getElementById('playback-retry').onclick = () => document.getElementById('btn-play').click();
+
 window.addEventListener('pageshow', event => {
-  if (!event.persisted || !hasCancelledHlsSources()) return;
-  const wasPlaying = S.playing;
-  renderPlayers(true);
-  if (wasPlaying) {
-    enterBufferingBarrier(null, null);
-    startClock();
-  }
+  if (event.persisted) updatePlayButton();
 });
 
 function updatePlayButton() {
@@ -756,6 +900,9 @@ function startClock() {
 
 function clockTick() {
   if (!S.playing || S.activeTab !== 'timeline') { _tickId = null; return; }
+  if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
+    failPlayback(); return;
+  }
   const videos = activeVideos();
   const completed = _wasBuffering ? null : videos.find(videoReachedEnd);
   if (completed) {
@@ -789,12 +936,18 @@ function clockTick() {
       return;
     }
     _wasBuffering = false;
+    finishRecovery();
     videos.forEach(video => {
       video.dataset.warming = '0';
       setPlayerStatus(video.parentElement, '');
       video.playbackRate = videoPlaybackRate(video);
       revealFreezeOnNextFrame(video);
-      video.play().catch(() => enterBufferingBarrier(video, t('player.buffering')));
+      const generation = video._generation, epoch = _playbackEpoch;
+      video.play().catch(() => {
+        if (S.playing && generation === video._generation && epoch === _playbackEpoch) {
+          enterBufferingBarrier(video, t('player.buffering'));
+        }
+      });
     });
     _clockStartTime = S.currentTime;
     _clockStartWall = performance.now();

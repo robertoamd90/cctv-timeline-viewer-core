@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=0.1.28">
+<link rel="stylesheet" href="style.css?v=0.1.28-remote1">
 </head>
 <body>
 
@@ -120,6 +120,10 @@
       <div id="viewer-camera-list"></div>
     </aside>
     <main id="viewer-main">
+      <div id="playback-notice" role="status" hidden>
+        <span id="playback-notice-text"></span>
+        <button id="playback-retry" data-i18n="player.retry">Retry playback</button>
+      </div>
       <div id="player-area"></div>
       <div id="resize-handle" data-i18n-title="controls.resizeTimeline"></div>
       <div id="timeline-wrap">
@@ -214,6 +218,15 @@
           </label>
         </fieldset>
         <button id="btn-save-stream-profiles" class="primary" data-i18n="streaming.save">Save profiles</button>
+        <fieldset class="stream-profile-fields playback-resources">
+          <legend data-i18n="streaming.resources">Server resources</legend>
+          <label><span data-i18n="streaming.maxTranscoders">Concurrent compressed streams</span>
+            <input id="stream-max-transcoders" type="number" min="0" max="64" step="1" value="0" inputmode="numeric"></label>
+          <label><span data-i18n="streaming.tempSpace">Temporary video space (MiB)</span>
+            <input id="stream-temp-mb" type="number" min="16" max="4096" step="16" value="256" inputmode="numeric"></label>
+        </fieldset>
+        <p class="hint" data-i18n="streaming.resourceHint">0 leaves concurrency unlimited. A limit applies to all viewers. If reached, playback pauses so you can select fewer cameras and retry.</p>
+        <button id="btn-save-playback-settings" class="primary" data-i18n="streaming.saveResources">Save resource limits</button>
       </section>
     </div>
 
@@ -255,13 +268,13 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=0.1.28"></script>
+<script src="js/i18n.js?v=0.1.28-remote1"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
-<script src="js/media.js?v=0.1.29"></script>
-<script src="js/app.js?v=0.1.29"></script>
+<script src="js/media.js?v=0.1.29-remote1"></script>
+<script src="js/app.js?v=0.1.29-remote1"></script>
 <script src="js/timeline.js?v=0.1.20"></script>
-<script src="js/player.js?v=0.1.35"></script>
+<script src="js/player.js?v=0.1.35-remote1"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);
 document.getElementById('btn-next-frame').onclick = () => jumpToBoundary(1);

@@ -24,3 +24,6 @@ Thumbs.db
 # Local application state.
 /data/
 /thumbnails/
+
+# Local design notes and review results.
+/docs/proposals/

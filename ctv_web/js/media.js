@@ -137,8 +137,11 @@
     return currentTime >= expectedDuration - 0.5;
   }
 
-  function requiredPlaybackBuffer(speed, currentTime, expectedDuration) {
-    const desired = speed >= 8 ? 4 : speed >= 4 ? 2 : 0.75;
+  function requiredPlaybackBuffer(speed, currentTime, expectedDuration, recovering = true) {
+    const resume = speed >= 8 ? 4 : speed >= 4 ? 2 : 0.75;
+    // Hysteresis prevents repeated pause/resume at the exact same threshold.
+    // Both thresholds are media seconds, scaled by browser consumption rate.
+    const desired = recovering ? resume : Math.min(resume, 0.15 * speed);
     if (!Number.isFinite(expectedDuration)) return desired;
     return Math.min(desired, Math.max(0, expectedDuration - currentTime - 0.5));
   }

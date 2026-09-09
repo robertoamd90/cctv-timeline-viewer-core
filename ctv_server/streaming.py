@@ -5,18 +5,17 @@ import re
 import shutil
 import tempfile
 import time
-from contextlib import asynccontextmanager
+import anyio
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-from ctv_server import db
+from ctv_server import db, playback
+import uuid
 
 
 PROFILE_NAMES = ("balanced", "fast")
-_MAX_TRANSCODERS = max(0, int(os.environ.get("CTV_MAX_TRANSCODERS", "0")))
-_transcode_slots = asyncio.Semaphore(_MAX_TRANSCODERS) if _MAX_TRANSCODERS else None
 _TRANSCODE_THREADS = max(1, int(os.environ.get("CTV_TRANSCODE_THREADS", "1")))
 _HLS_READRATE_FACTOR = max(1.0, float(os.environ.get("CTV_HLS_READRATE_FACTOR", "1.5")))
 _HLS_ACTIVE_IDLE_TIMEOUT = max(
@@ -44,16 +43,21 @@ class HlsJob:
     started_at: float
     started_logged: bool = False
     cancelled: bool = False
+    lease: object = None
+    expiry_task: object = None
 
 
 _hls_jobs: dict[str, HlsJob] = {}
 _hls_lock = asyncio.Lock()
 _hls_tasks: set[asyncio.Task] = set()
 _progressive_processes: set[asyncio.subprocess.Process] = set()
+_budget_task = None
 log = logging.getLogger("ctv.streaming")
 
 
 def _hls_failure_detail(job: HlsJob) -> str:
+    if job.lease:
+        return job.lease.error_tail.decode("utf-8", errors="replace")[-1000:]
     try:
         detail = job.error_path.read_text(
             encoding="utf-8", errors="replace",
@@ -142,7 +146,10 @@ def _encoding_command(
     )
     readrate_options = (
         ["-readrate", f"{speed * _HLS_READRATE_FACTOR:g}"]
-        if pace_for_playback else []
+        # At high encoded speeds, input readrate and timestamp compression can
+        # delay even the first fragment after a seek. Keep normal-speed pacing;
+        # high-speed jobs rely on admission, cancellation and the temp budget.
+        if pace_for_playback and speed < 8 else []
     )
     return [
         "ffmpeg",
@@ -245,11 +252,18 @@ def build_hls_command(
 async def _stop_process(process: asyncio.subprocess.Process):
     if process.returncode is not None:
         return
-    process.terminate()
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        await process.wait()
+        return
     try:
         await asyncio.wait_for(process.wait(), timeout=2)
     except asyncio.TimeoutError:
-        process.kill()
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
         await process.wait()
 
 
@@ -268,17 +282,13 @@ async def _stop_idle_transcode(
             "Stopping progressive transcode after %.1fs without client delivery",
             _TRANSCODE_IDLE_TIMEOUT,
         )
-        await _stop_process(process)
+        await playback.stop_process(process)
         return
 
 
-@asynccontextmanager
-async def _transcode_slot():
-    if _transcode_slots is None:
-        yield
-        return
-    async with _transcode_slots:
-        yield
+def stream_signature(filepath, profile, start_seconds, speed, transport):
+    return (filepath, profile["name"], profile["scale_percent"], profile["fps"],
+            profile["bitrate_kbps"], round(start_seconds, 3), speed, transport)
 
 
 async def _expire_hls_job(job_id: str):
@@ -290,6 +300,7 @@ async def _expire_hls_job(job_id: str):
         if idle_for >= _HLS_ACTIVE_IDLE_TIMEOUT:
             job.cancelled = True
             await _stop_process(job.process)
+            await playback.cancel(job_id, "idle")
             log.info(
                 "Stopped abandoned HLS session %s after %.1fs without requests",
                 job_id[:8], idle_for,
@@ -334,18 +345,56 @@ async def _expire_hls_job(job_id: str):
         return
 
 
-async def cancel_hls_job(job_id: str) -> bool:
+async def cancel_hls_job(job_id: str, reason="cancelled") -> bool:
     if not _HLS_ID_PATTERN.fullmatch(job_id):
         return False
     async with _hls_lock:
         job = _hls_jobs.pop(job_id, None)
-        if not job:
-            return False
-        job.cancelled = True
+        if job:
+            job.cancelled = True
+    await playback.cancel(job_id, reason)
+    if not job:
+        return False
+    if job.expiry_task and job.expiry_task is not asyncio.current_task():
+        job.expiry_task.cancel()
+        await asyncio.gather(job.expiry_task, return_exceptions=True)
     await _stop_process(job.process)
     shutil.rmtree(job.directory, ignore_errors=True)
     log.info("Cancelled HLS session %s", job_id[:8])
     return True
+
+
+def _directory_bytes(directory):
+    total = 0
+    try:
+        for path in directory.iterdir():
+            try:
+                total += path.stat().st_size
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+    return total
+
+
+async def enforce_hls_budget():
+    while _hls_jobs:
+        jobs = list(_hls_jobs.items())
+        sizes = await asyncio.gather(*(asyncio.to_thread(_directory_bytes, job.directory) for _, job in jobs))
+        total = sum(sizes)
+        limit = playback.settings()["hls_temp_mb"] * 1024 * 1024
+        # Invalidate whole sessions before removing their files. Never prune a
+        # segment from a playlist that remains valid. Prefer oldest completed
+        # sessions, then the least recently accessed producer.
+        for (job_id, job), size in sorted(zip(jobs, sizes), key=lambda item: (
+                item[0][1].process.returncode is None, item[0][1].last_access)):
+            if total <= limit:
+                break
+            if _hls_jobs.get(job_id) is job:
+                log.warning("HLS session %s cancelled: temporary storage budget reached", job_id[:8])
+                await cancel_hls_job(job_id, "storage_limit")
+                total -= size
+        await asyncio.sleep(0.5)
 
 
 async def ensure_hls_playlist(
@@ -355,51 +404,52 @@ async def ensure_hls_playlist(
     start_seconds: float,
     speed: float,
 ) -> Path:
+    global _budget_task
     if not _HLS_ID_PATTERN.fullmatch(job_id):
         raise ValueError("Invalid HLS session")
-    signature = (
-        filepath,
-        profile["name"],
-        profile["scale_percent"],
-        profile["fps"],
-        profile["bitrate_kbps"],
-        round(start_seconds, 3),
-        speed,
-    )
+    signature = stream_signature(filepath, profile, start_seconds, speed, "hls")
     async with _hls_lock:
         job = _hls_jobs.get(job_id)
         if job and job.signature != signature:
             raise ValueError("HLS session parameters changed")
         if not job:
+            lease = playback.claim(job_id, signature)
             directory = _HLS_ROOT / job_id
-            directory.mkdir(parents=True, exist_ok=False)
             started_at = time.monotonic()
             error_path = directory / "ffmpeg.log"
             try:
-                with error_path.open("wb") as error_output:
-                    process = await asyncio.create_subprocess_exec(
+                directory.mkdir(parents=True, exist_ok=False)
+                process = await asyncio.create_subprocess_exec(
                         *build_hls_command(
                             filepath, profile, start_seconds, speed, str(directory),
                         ),
                         stdout=asyncio.subprocess.DEVNULL,
-                        stderr=error_output,
+                        stderr=asyncio.subprocess.PIPE,
                     )
-            except Exception:
+                await playback.attach(lease, process)
+            except BaseException:
+                await playback.cancel(job_id, "start_failed")
                 shutil.rmtree(directory, ignore_errors=True)
                 raise
             job = HlsJob(
                 signature, directory, error_path, process, started_at, started_at,
+                lease=lease,
             )
             _hls_jobs[job_id] = job
             log.info(
                 "Starting HLS session %s profile=%s speed=%gx offset=%.3fs "
-                "threads=%d readrate=%gx",
+                "threads=%d readrate=%s",
                 job_id[:8], profile["name"], speed, start_seconds,
-                _TRANSCODE_THREADS, speed * _HLS_READRATE_FACTOR,
+                _TRANSCODE_THREADS, f"{speed * _HLS_READRATE_FACTOR:g}x" if speed < 8 else "unpaced",
             )
             task = asyncio.create_task(_expire_hls_job(job_id))
+            job.expiry_task = task
             _hls_tasks.add(task)
             task.add_done_callback(_hls_tasks.discard)
+            if _budget_task is None or _budget_task.done():
+                _budget_task = asyncio.create_task(enforce_hls_budget())
+                _hls_tasks.add(_budget_task)
+                _budget_task.add_done_callback(_hls_tasks.discard)
         else:
             job.last_access = time.monotonic()
 
@@ -407,6 +457,8 @@ async def ensure_hls_playlist(
     required_segments = initial_hls_segment_count(speed)
     deadline = time.monotonic() + _HLS_START_TIMEOUT
     while time.monotonic() < deadline:
+        if job.cancelled:
+            raise ValueError("HLS session cancelled")
         if job.process.returncode not in (None, 0):
             log.warning(
                 "HLS session %s failed: %s",
@@ -433,6 +485,9 @@ async def ensure_hls_playlist(
                 job.last_access = time.monotonic()
                 if not job.started_logged:
                     job.started_logged = True
+                    lease = job.lease
+                    if lease:
+                        lease.first_output_seconds = time.monotonic() - job.started_at
                     log.info(
                         "HLS session %s playable in %.2fs with %d buffered segments",
                         job_id[:8],
@@ -442,6 +497,7 @@ async def ensure_hls_playlist(
                 return playlist
         await asyncio.sleep(0.05)
     await _stop_process(job.process)
+    await playback.cancel(job_id, "start_timeout")
     log.warning(
         "HLS session %s did not produce a playable segment within %ss",
         job_id[:8], _HLS_START_TIMEOUT,
@@ -451,6 +507,8 @@ async def ensure_hls_playlist(
 
 def hls_playlist_contents(playlist: Path) -> bytes:
     contents = playlist.read_text(encoding="utf-8")
+    # FFmpeg rounds sub-second tails to zero; native HLS rejects that playlist.
+    contents = contents.replace("#EXT-X-TARGETDURATION:0\n", "#EXT-X-TARGETDURATION:1\n")
     start_tag = "#EXT-X-START:TIME-OFFSET=0,PRECISE=YES"
     if start_tag not in contents:
         contents = contents.replace(
@@ -490,39 +548,75 @@ async def shutdown_hls_jobs():
     progressive = list(_progressive_processes)
     _progressive_processes.clear()
     await asyncio.gather(
-        *(_stop_process(process) for process in progressive),
+        *(playback.stop_process(process) for process in progressive),
         return_exceptions=True,
     )
     shutil.rmtree(_HLS_ROOT, ignore_errors=True)
+    await playback.shutdown()
 
 
 async def transcode_stream(
-    filepath: str,
-    profile: dict,
-    start_seconds: float,
-    speed: float,
+    filepath: str, profile: dict, start_seconds: float, speed: float, lease=None,
 ) -> AsyncIterator[bytes]:
-    async with _transcode_slot():
-        process = await asyncio.create_subprocess_exec(
-            *build_transcode_command(filepath, profile, start_seconds, speed),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        _progressive_processes.add(process)
+    if lease is None:
+        lease = playback.claim(uuid.uuid4().hex, stream_signature(filepath, profile, start_seconds, speed, "mp4"))
+    process = None
+    idle_task = None
+    started_at = time.monotonic()
+    completed = False
+    try:
+        with anyio.CancelScope(shield=True):
+            lease.spawning = True
+            process = await asyncio.create_subprocess_exec(
+                *build_transcode_command(filepath, profile, start_seconds, speed),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            _progressive_processes.add(process)
+            await playback.attach(lease, process)
+        log.info("Starting MP4 session %s profile=%s speed=%gx offset=%.3fs",
+                 lease.id[:8], profile["name"], speed, start_seconds)
         last_delivery = [time.monotonic()]
-        idle_task = asyncio.create_task(
-            _stop_idle_transcode(process, last_delivery)
-        )
-        try:
-            while True:
-                chunk = await process.stdout.read(256 * 1024)
-                if not chunk:
-                    break
-                last_delivery[0] = time.monotonic()
-                yield chunk
-            await process.wait()
-        finally:
-            idle_task.cancel()
-            await asyncio.gather(idle_task, return_exceptions=True)
-            await _stop_process(process)
-            _progressive_processes.discard(process)
+        idle_task = asyncio.create_task(_stop_idle_transcode(process, last_delivery))
+        while True:
+            chunk = await process.stdout.read(256 * 1024)
+            if not chunk:
+                break
+            if not lease.bytes_sent:
+                lease.first_output_seconds = time.monotonic() - started_at
+                log.info("MP4 session %s first output in %.2fs", lease.id[:8], lease.first_output_seconds)
+            lease.bytes_sent += len(chunk)
+            last_delivery[0] = time.monotonic()
+            yield chunk
+        await process.wait()
+        await lease.error_task
+        completed = process.returncode == 0
+        if not completed:
+            log.warning("MP4 session %s failed (exit=%s): %s", lease.id[:8], process.returncode,
+                        lease.error_tail.decode("utf-8", errors="replace").strip())
+        playback.finish(lease, "completed" if completed else "failed", "" if completed else "encoding")
+    except playback.PlaybackUnavailable:
+        # A cancellation may arrive after HTTP headers but before attachment.
+        # End the body; session status communicates why it was interrupted.
+        return
+    finally:
+        with anyio.CancelScope(shield=True):
+            lease.spawned.set()
+            if idle_task:
+                idle_task.cancel()
+                await asyncio.gather(idle_task, return_exceptions=True)
+            if process:
+                await playback.stop_process(process)
+                # No competing stdout consumer remains in this generator.
+                while await process.stdout.read(65536):
+                    pass
+                if lease.error_task:
+                    await asyncio.gather(lease.error_task, return_exceptions=True)
+                _progressive_processes.discard(process)
+            await playback.cancel(lease.id, "closed")
+            if playback.history.get(lease.id, {}).get("state") == lease.state:
+                playback.remember(lease)
+            log.info("MP4 session %s stopped completed=%s bytes=%d elapsed=%.2fs",
+                     lease.id[:8], completed, lease.bytes_sent, time.monotonic() - started_at)
+
+
+_read_error_tail = playback.drain_errors

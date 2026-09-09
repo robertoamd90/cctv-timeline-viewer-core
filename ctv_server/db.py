@@ -245,6 +245,12 @@ def init_db():
             bitrate_kbps INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS playback_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            max_transcoders INTEGER NOT NULL,
+            hls_temp_mb INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS schema_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -256,6 +262,11 @@ def init_db():
             recordings_missing INTEGER NOT NULL DEFAULT 0
         );
     """)
+    conn.execute(
+        "INSERT OR IGNORE INTO playback_settings VALUES (1, ?, ?)",
+        (max(0, int(os.environ.get("CTV_MAX_TRANSCODERS", "0"))),
+         max(16, int(os.environ.get("CTV_HLS_TEMP_MB", "256")))),
+    )
     conn.executemany(
         """
         INSERT OR IGNORE INTO stream_profiles (name, scale_percent, fps, bitrate_kbps)

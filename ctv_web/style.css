@@ -573,3 +573,13 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
 @media (max-width: 350px) {
   #time-display { display: none; }
 }
+#playback-notice:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #3b3020;
+  color: #ffe1aa;
+  flex-wrap: wrap;
+}

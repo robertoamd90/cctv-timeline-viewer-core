@@ -5,6 +5,10 @@ import mimetypes
 import re
 import time
 from contextlib import asynccontextmanager
+import uuid
+import anyio
+from ctv_server import playback
+from ctv_server.models import PlaybackRequest
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +26,7 @@ from ctv_server.streaming import (
     hls_segment,
     shutdown_hls_jobs,
     transcode_stream,
+    stream_signature,
 )
 
 # ── Logging ──
@@ -212,17 +217,62 @@ def serve_video(recording_id: int):
     return VideoFileResponse(filepath, media_type=media_type, expected_duration=row["duration"])
 
 
+@app.exception_handler(playback.PlaybackUnavailable)
+async def playback_unavailable(request, exc):
+    return JSONResponse(status_code=503 if exc.code == "capacity" else 409,
+                        content={"detail": exc.code}, headers={"Retry-After": "2"})
+
+
+@app.post("/api/playback-sessions")
+async def admit_playback(body: PlaybackRequest):
+    row = _stream_recording(body.recording_id, body.start)
+    profile = get_stream_profiles()[body.profile]
+    playback.reserve(body.session_id, stream_signature(row["path"], profile, body.start, body.speed, body.transport))
+    return {"session_id": body.session_id}
+
+
+@app.get("/api/playback-sessions/{session_id}")
+async def playback_session_status(session_id: str):
+    return playback.session_status(session_id)
+
+
+@app.delete("/api/playback-sessions/{session_id}", status_code=204)
+async def cancel_playback_session(session_id: str):
+    if not re.fullmatch(r"[a-f0-9]{32}", session_id):
+        raise HTTPException(status_code=400, detail="Invalid session")
+    await cancel_hls_job(session_id)
+    return Response(status_code=204)
+
+
+class PlaybackStreamingResponse(StreamingResponse):
+    def __init__(self, iterator, lease, **kwargs):
+        super().__init__(iterator, **kwargs)
+        self.lease = lease
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette may cancel streaming before the generator is entered.
+            with anyio.CancelScope(shield=True):
+                await self.body_iterator.aclose()
+                await playback.cancel(self.lease.id, "disconnected")
+
+
 @app.get("/stream/{recording_id}")
 async def serve_transcoded_video(
     recording_id: int,
     profile: str = Query(..., pattern="^(balanced|fast)$"),
     start: float = Query(0, ge=0),
     speed: float = Query(1, ge=1, le=16),
+    session_id: str = Query(None, pattern="^[a-f0-9]{32}$"),
 ):
     row = _stream_recording(recording_id, start)
     selected_profile = get_stream_profiles()[profile]
-    return StreamingResponse(
-        transcode_stream(row["path"], selected_profile, start, speed),
+    lease = playback.claim(session_id or uuid.uuid4().hex,
+                           stream_signature(row["path"], selected_profile, start, speed, "mp4"))
+    return PlaybackStreamingResponse(
+        transcode_stream(row["path"], selected_profile, start, speed, lease=lease), lease,
         media_type="video/mp4",
         headers={
             "Cache-Control": "no-store",
@@ -245,6 +295,8 @@ async def serve_hls_playlist(
         playlist = await ensure_hls_playlist(
             job_id, row["path"], selected_profile, start, speed,
         )
+    except playback.PlaybackUnavailable:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TimeoutError as exc:

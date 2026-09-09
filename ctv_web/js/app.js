@@ -242,6 +242,9 @@ function fillStreamProfileForm(name, profile) {
 
 async function loadStreamProfiles() {
   S.streamProfiles = await api('/api/stream-profiles');
+  const playback = await api('/api/playback-status');
+  document.getElementById('stream-max-transcoders').value = playback.max_transcoders;
+  document.getElementById('stream-temp-mb').value = playback.hls_temp_mb;
   document.getElementById('quality-select').value = S.streamProfile;
   if (S.session.is_admin) {
     fillStreamProfileForm('balanced', S.streamProfiles.balanced);
@@ -602,7 +605,7 @@ function setMobileToolbarCollapsed(collapsed, persist = true) {
   if (persist) localStorage.setItem('ctv-mobile-toolbar-collapsed', collapsed ? '1' : '0');
   requestAnimationFrame(() => {
     updateGridLayout();
-    renderPlayers();
+    if (typeof renderPlayers === 'function') renderPlayers();
   });
 }
 
@@ -615,7 +618,7 @@ setMobileToolbarCollapsed(localStorage.getItem('ctv-mobile-toolbar-collapsed') =
 function setSidebarCollapsed(collapsed, persist = true) {
   document.getElementById('viewer-sidebar').classList.toggle('collapsed', collapsed);
   if (persist) localStorage.setItem('ctv-sidebar-collapsed', collapsed ? '1' : '0');
-  setTimeout(() => { updateGridLayout(); renderPlayers(); }, 170);
+  setTimeout(() => { updateGridLayout(); if (typeof renderPlayers === 'function') renderPlayers(); }, 170);
 }
 document.getElementById('btn-sidebar').onclick = () => {
   setSidebarCollapsed(!document.getElementById('viewer-sidebar').classList.contains('collapsed'));
@@ -1183,7 +1186,7 @@ document.getElementById('btn-rebuild-index').onclick = async () => {
 
 document.getElementById('btn-save-stream-profiles').onclick = async () => {
   const button = document.getElementById('btn-save-stream-profiles');
-  if (!document.getElementById('stream-profile-settings').querySelectorAll('input:invalid').length) {
+  if (!document.getElementById('stream-profile-settings').querySelectorAll('fieldset:not(.playback-resources) input:invalid').length) {
     button.disabled = true;
     try {
       S.streamProfiles = await api('/api/admin/stream-profiles', {
@@ -1203,8 +1206,24 @@ document.getElementById('btn-save-stream-profiles').onclick = async () => {
       button.disabled = false;
     }
   } else {
-    document.getElementById('stream-profile-settings').querySelector('input:invalid')?.reportValidity();
+    document.getElementById('stream-profile-settings').querySelector('fieldset:not(.playback-resources) input:invalid')?.reportValidity();
   }
+};
+
+document.getElementById('btn-save-playback-settings').onclick = async () => {
+  const limit = document.getElementById('stream-max-transcoders');
+  const space = document.getElementById('stream-temp-mb');
+  if (!limit.reportValidity() || !space.reportValidity()) return;
+  const button = document.getElementById('btn-save-playback-settings');
+  button.disabled = true;
+  try {
+    await api('/api/admin/playback-settings', {method: 'PUT', body: {
+      max_transcoders: Number(limit.value), hls_temp_mb: Number(space.value),
+    }});
+    toast(t('streaming.saved'), 'info');
+  } catch (error) {
+    toast(t('streaming.errorSaving', {message: localizeMessage(error.message)}), 'error');
+  } finally { button.disabled = false; }
 };
 
 // ═══ Timeline resize ═══
@@ -1247,7 +1266,7 @@ function scheduleViewportRefresh() {
   clearTimeout(_viewportRefreshTimer);
   _viewportRefreshTimer = setTimeout(() => {
     updateGridLayout();
-    renderPlayers();
+    if (typeof renderPlayers === 'function') renderPlayers();
     if (S.timeline && S.zoomRange) renderTimeline();
   }, 180);
 }

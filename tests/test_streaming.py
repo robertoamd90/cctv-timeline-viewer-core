@@ -21,7 +21,7 @@ from ctv_server.streaming import (
     initial_hls_segment_count,
     shutdown_hls_jobs,
 )
-from ctv_server import streaming
+from ctv_server import streaming, playback
 
 
 class StreamProfileTests(unittest.TestCase):
@@ -69,6 +69,13 @@ class StreamProfileTests(unittest.TestCase):
 
 
 class TranscodeCommandTests(unittest.TestCase):
+    def setUp(self):
+        playback.history.clear()
+        playback.leases.clear()
+        self.settings_patch = patch.object(playback, "settings", return_value={"max_transcoders": 0, "hls_temp_mb": 256})
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
     profile = {
         "name": "balanced",
         "scale_percent": 50,
@@ -109,6 +116,12 @@ class TranscodeCommandTests(unittest.TestCase):
         command = build_transcode_command("/video/input.mp4", self.profile, 0, 16)
         self.assertEqual(command[command.index("-skip_frame") + 1], "nokey")
         self.assertLess(command.index("-skip_frame"), command.index("-i"))
+
+    def test_high_speed_hls_seek_does_not_delay_output_with_input_pacing(self):
+        for speed in (8, 16):
+            command = build_hls_command("/video/input.mp4", self.profile, 2, speed, "/tmp/hls")
+            self.assertNotIn("-readrate", command)
+            self.assertNotIn("-skip_frame", command, "offset seeks must preserve short recording tails")
 
     def test_moderate_speed_decodes_all_source_frames(self):
         command = build_transcode_command("/video/input.mp4", self.profile, 0, 4)
@@ -184,6 +197,16 @@ class TranscodeCommandTests(unittest.TestCase):
             self.assertAlmostEqual(
                 float(metadata["packets"][0]["pts_time"]), 0, places=3,
             )
+
+    def test_short_hls_tail_has_positive_target_duration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            playlist = Path(tmp) / "index.m3u8"
+            original = "#EXTM3U\n#EXT-X-TARGETDURATION:0\n#EXTINF:0.125000,\nsegment_00000.ts\n#EXT-X-ENDLIST\n"
+            playlist.write_text(original, encoding="utf-8")
+            served = hls_playlist_contents(playlist).decode("utf-8")
+            self.assertIn("#EXT-X-TARGETDURATION:1\n", served)
+            self.assertIn("#EXTINF:0.125000,", served)
+            self.assertEqual(playlist.read_text(encoding="utf-8"), original)
 
     def test_hls_session_returns_a_playable_event_playlist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,6 +326,87 @@ class TranscodeCommandTests(unittest.TestCase):
                 self.assertNotIn(job_id, streaming._hls_jobs)
 
         asyncio.run(scenario())
+
+
+class ProgressiveLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        playback.history.clear()
+        playback.leases.clear()
+        self.settings_patch = patch.object(playback, "settings", return_value={"max_transcoders": 1, "hls_temp_mb": 256})
+        self.settings_patch.start()
+        self.addCleanup(self.settings_patch.stop)
+
+    def test_cancelled_hls_start_does_not_wait_for_start_timeout(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as tmp:
+                job_id = "abcdef0123456789abcdef0123456789"
+                profile = TranscodeCommandTests.profile
+                signature = (
+                    "unused", profile["name"], profile["scale_percent"],
+                    profile["fps"], profile["bitrate_kbps"], 0, 1, "hls",
+                )
+                job = streaming.HlsJob(
+                    signature, Path(tmp), Path(tmp) / "ffmpeg.log", None, 0, 0,
+                    cancelled=True,
+                )
+                streaming._hls_jobs[job_id] = job
+                try:
+                    with self.assertRaisesRegex(ValueError, "cancelled"):
+                        await asyncio.wait_for(
+                            ensure_hls_playlist(job_id, "unused", profile, 0, 1), 1,
+                        )
+                finally:
+                    streaming._hls_jobs.pop(job_id, None)
+        asyncio.run(scenario())
+
+    def test_error_output_is_drained_and_bounded(self):
+        async def scenario():
+            reader = asyncio.StreamReader()
+            reader.feed_data(b"x" * 100000 + b"last diagnostic")
+            reader.feed_eof()
+            tail = bytearray()
+            await streaming._read_error_tail(reader, tail)
+            self.assertEqual(len(tail), 4096)
+            self.assertTrue(tail.endswith(b"last diagnostic"))
+        asyncio.run(scenario())
+
+    def test_disconnect_stops_real_ffmpeg_and_releases_slot(self):
+        async def scenario():
+            command = [
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-re", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10",
+                "-c:v", "libx264", "-preset", "ultrafast", "-g", "10",
+                "-movflags", "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1",
+            ]
+            with patch.object(streaming, "build_transcode_command", return_value=command):
+                stream = streaming.transcode_stream("unused", TranscodeCommandTests.profile, 0, 1)
+                try:
+                    self.assertTrue(await asyncio.wait_for(anext(stream), 10))
+                    processes = list(streaming._progressive_processes)
+                    self.assertEqual(len(processes), 1)
+                    self.assertEqual(len(playback.leases), 1)
+                finally:
+                    await asyncio.wait_for(stream.aclose(), 3)
+                self.assertIsNotNone(processes[0].returncode)
+                self.assertFalse(streaming._progressive_processes)
+                self.assertFalse(playback.leases)
+                await playback.shutdown()
+        asyncio.run(scenario())
+
+    def test_process_exit_race_is_harmless(self):
+        class ExitingProcess:
+            returncode = None
+
+            def terminate(self):
+                raise ProcessLookupError()
+
+            async def wait(self):
+                self.returncode = 0
+                return 0
+
+        process = ExitingProcess()
+        asyncio.run(streaming._stop_process(process))
+        self.assertEqual(process.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,28 @@ from ctv_server.db import (
     write_db,
 )
 from ctv_server.models import StreamProfilesUpdate
+from ctv_server.models import PlaybackSettings
+from ctv_server import playback
 from ctv_server.operations import IndexBusyError, maintenance_window
 from ctv_server.streaming import get_stream_profiles, invalidate_stream_profiles
 from ctv_server.thumbnailer import THUMBNAIL_DIR
 
 router = APIRouter(prefix="/api", tags=["system"])
 log = logging.getLogger("ctv.system")
+
+
+@router.get("/playback-status")
+async def playback_status():
+    return playback.status()
+
+
+@router.put("/admin/playback-settings")
+async def update_playback_settings(settings: PlaybackSettings, _: CurrentUser = Depends(require_admin)):
+    with write_db() as conn:
+        conn.execute("UPDATE playback_settings SET max_transcoders = ?, hls_temp_mb = ? WHERE id = 1",
+                     (settings.max_transcoders, settings.hls_temp_mb))
+    playback.invalidate_settings()
+    return playback.status()
 
 
 @router.get("/stream-profiles")

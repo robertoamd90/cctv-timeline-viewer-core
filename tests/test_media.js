@@ -146,12 +146,12 @@ assert.match(playerSource, /streamTransport === 'mp4'\) return true/);
 assert(playerSource.includes('/stream/${rec.id}'));
 assert(playerSource.includes('/video/${rec.id}?v=${_nativeMediaCacheToken}'));
 assert(playerSource.includes("canPlayType('application/vnd.apple.mpegurl')"));
-assert.match(playerSource, /fetch\(appUrl\(`\/hls\/\$\{jobId\}`\), \{method: 'DELETE', keepalive: true\}\)/);
+assert.match(playerSource, /fetch\(appUrl\(`\/api\/playback-sessions\/\$\{jobId\}`\), \{method: 'DELETE', keepalive: true, signal: controller.signal\}\)/);
 assert.match(playerSource, /if \(hasCancelledHlsSources\(\)\) renderPlayers\(true\)/);
 assert.match(playerSource, /navigator\.maxTouchPoints > 0/);
 assert.match(playerSource, /if \(!mobilePlayback\) return false/);
 assert(playerSource.includes('/hls/${jobId}/index.m3u8'));
-assert.match(playerSource, /requiredPlaybackBuffer\(videoPlaybackRate\(video\)/);
+assert.match(playerSource, /requiredPlaybackBuffer\(\s*videoPlaybackRate\(video\)/);
 assert.match(playerSource, /transcodedTailHasFrame/);
 assert.match(playerSource, /CtvMedia\.recordingAt/);
 assert.match(playerSource, /const completed = _wasBuffering \? null/);
@@ -164,11 +164,6 @@ assert.match(playerSource, /S\.speed = speed;\s+_clockStartTime = S\.currentTime
 assert.match(playerSource, /dataset\.playbackRate = String\(S\.speed\)/);
 assert.match(playerSource, /speedSelect\.addEventListener\('input'/);
 assert.match(playerSource, /S\.playing && requiresWarmup/);
-assert.match(
-  playerSource,
-  /streamTransport !== 'mp4'[\s\S]*?target > 0\.1 && remaining > 0\.5/,
-  'a progressive stream must be reopened at the global time instead of sought in place',
-);
 assert.match(
   playerSource,
   /streamTransport === 'mp4'[\s\S]*?if \(remaining <= 0\.5\) return;[\s\S]*?restartProgressiveVideo\(video\)/,

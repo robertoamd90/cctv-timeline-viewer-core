@@ -54,3 +54,17 @@ class StreamProfileConfig(BaseModel):
 class StreamProfilesUpdate(BaseModel):
     balanced: StreamProfileConfig
     fast: StreamProfileConfig
+
+
+class PlaybackSettings(BaseModel):
+    max_transcoders: int = Field(..., ge=0, le=64)
+    hls_temp_mb: int = Field(..., ge=16, le=4096)
+
+
+class PlaybackRequest(BaseModel):
+    session_id: str = Field(..., pattern="^[a-f0-9]{32}$")
+    recording_id: int = Field(..., ge=1)
+    profile: str = Field(..., pattern="^(balanced|fast)$")
+    start: float = Field(0, ge=0, allow_inf_nan=False)
+    speed: float = Field(1, ge=1, le=16, allow_inf_nan=False)
+    transport: str = Field(..., pattern="^(mp4|hls)$")

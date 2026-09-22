@@ -2,12 +2,11 @@
 import hashlib
 import json
 import logging
-import os
 import re
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from ctv_server.ha_client import get_json, HAError
 from zoneinfo import ZoneInfo
 
 from ctv_server.db import get_db, write_db
@@ -35,23 +34,11 @@ def parse_mapping(value):
 
 
 def fetch_history(mapping, start, end):
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        raise RuntimeError("HA Supervisor token unavailable")
     query = urlencode({"filter_entity_id": ",".join(mapping),
                        "end_time": datetime.fromtimestamp(end, ZoneInfo("UTC")).isoformat(),
                        "no_attributes": "", "minimal_response": ""})
     stamp = datetime.fromtimestamp(start, ZoneInfo("UTC")).isoformat()
-    request = Request(f"http://supervisor/core/api/history/period/{stamp}?{query}",
-                      headers={"Authorization": f"Bearer {token}"})
-    with urlopen(request, timeout=10) as response:
-        raw = response.read(8 * 1024 * 1024 + 1)
-    if len(raw) > 8 * 1024 * 1024:
-        raise ValueError("HA history response too large")
-    result = json.loads(raw)
-    if not isinstance(result, list):
-        raise ValueError("Invalid HA history")
-    return result
+    return get_json(f'/history/period/{stamp}?{query}')
 
 
 def extract_events(history, mapping, start, end):
@@ -122,7 +109,10 @@ def _enrich(camera_id, key, generation):
         query_start = max(start - 86400, min(start, min(r["start_ts"] + offset for r in targets)))
         query_end = min(end + 86400, max(end, max((r["end_ts"] or r["start_ts"]) + offset for r in targets)))
         events = extract_events(fetch_history(mapping, query_start, query_end), mapping, query_start, query_end)
-    except Exception:
+    except Exception as exc:
+        code = exc.code if isinstance(exc, HAError) else "invalid_response"
+        log.warning("HA history failed camera=%s day=%s code=%s status=%s",
+                    camera_id, key, code, getattr(exc, "status", None))
         events, failed = [], True
     updates = []
     for row in targets:

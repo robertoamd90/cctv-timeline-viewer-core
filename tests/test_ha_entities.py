@@ -13,9 +13,7 @@ class HaEntityDiscoveryTests(unittest.TestCase):
             {'entity_id':'binary_sensor.front','state':'unavailable','attributes':{'friendly_name':'Front','secret':'hidden'}},
             {'entity_id':'binary_sensor.back','state':'off','attributes':{'friendly_name':'Back'}},
         ]
-        response = MagicMock()
-        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
-        with patch.dict('os.environ', {'SUPERVISOR_TOKEN':'test-token'}), patch('ctv_server.ha_entities.urlopen',return_value=response):
+        with patch('ctv_server.ha_entities.get_json', return_value=payload):
             entities = list_event_entities()
         self.assertEqual([e['name'] for e in entities],['Back','Front'])
         self.assertEqual(set(entities[0]),{'entity_id','name','state'})

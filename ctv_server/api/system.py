@@ -206,7 +206,12 @@ def list_source_directories(
 @router.get("/admin/ha-event-entities")
 def ha_event_entities(_: CurrentUser = Depends(require_admin)):
     from ctv_server.ha_entities import list_event_entities
+    from ctv_server.ha_client import HAError
     try:
         return {"entities": list_event_entities()}
-    except Exception:
-        raise HTTPException(status_code=503, detail="Home Assistant entity discovery unavailable") from None
+    except HAError as exc:
+        log.warning("HA entity discovery failed: code=%s status=%s", exc.code, exc.status)
+        raise HTTPException(status_code=503, detail="ha_entities." + exc.code) from None
+    except Exception as exc:
+        log.warning("HA entity discovery failed: code=invalid_response exception=%s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="ha_entities.invalid_response") from None

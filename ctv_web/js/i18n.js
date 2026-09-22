@@ -2,6 +2,17 @@
 
 const CTV_TRANSLATIONS = {
   en: {
+    "ha_entities.missing_token": "Supervisor token missing. Restart the add-on.",
+    "ha_entities.unauthorized": "Home Assistant API access denied (401/403).",
+    "ha_entities.http_error": "Supervisor returned an HTTP error; see add-on logs for the status.",
+    "ha_entities.dns_error": "Cannot resolve the internal supervisor hostname.",
+    "ha_entities.timeout": "Home Assistant did not respond within 10 seconds.",
+    "ha_entities.permission_denied": "The add-on security profile denied access.",
+    "ha_entities.connection_error": "Connection to the Supervisor failed.",
+    "ha_entities.response_too_large": "HA response exceeds the 8 MiB limit.",
+    "ha_entities.invalid_response": "HA returned an unexpected response.",
+    "ha_entities.invalid_request": "Invalid internal HA request.",
+
     "events.load": "Load / refresh HA entities",
     "events.search": "Search by name or entity ID",
     "events.entity": "Home Assistant entity",
@@ -196,6 +207,17 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
+    "ha_entities.missing_token": "Token Supervisor assente. Riavvia l’add-on.",
+    "ha_entities.unauthorized": "Accesso API Home Assistant negato (401/403).",
+    "ha_entities.http_error": "Il Supervisor ha restituito un errore HTTP; il codice è nei log dell’add-on.",
+    "ha_entities.dns_error": "Impossibile risolvere il nome interno supervisor.",
+    "ha_entities.timeout": "Home Assistant non ha risposto entro 10 secondi.",
+    "ha_entities.permission_denied": "Il profilo di sicurezza dell’add-on ha negato l’accesso.",
+    "ha_entities.connection_error": "Connessione al Supervisor fallita.",
+    "ha_entities.response_too_large": "La risposta HA supera il limite di 8 MiB.",
+    "ha_entities.invalid_response": "HA ha restituito una risposta inattesa.",
+    "ha_entities.invalid_request": "Richiesta interna HA non valida.",
+
     "events.load": "Carica / aggiorna entità HA",
     "events.search": "Cerca per nome o ID entità",
     "events.entity": "Entità Home Assistant",

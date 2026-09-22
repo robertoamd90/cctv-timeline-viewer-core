@@ -46,8 +46,11 @@
       entities = result.entities; loaded = true; search.disabled = false;
       status.textContent = t(entities.length ? 'events.loaded' : 'events.empty');
       render();
-    } catch (_) {
-      status.textContent = t('events.discoveryError');
+    } catch (error) {
+      const code = String(error.message || '');
+      const known = ['missing_token', 'unauthorized', 'http_error', 'dns_error', 'timeout', 'permission_denied', 'connection_error', 'response_too_large', 'invalid_response', 'invalid_request'];
+      const reason = code.startsWith('ha_entities.') && known.includes(code.slice(12)) ? t(code) : '';
+      status.textContent = t('events.discoveryError') + (reason ? ' ' + reason : '');
     } finally { load.disabled = false; }
   };
   search.oninput = filter;

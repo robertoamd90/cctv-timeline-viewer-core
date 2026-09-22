@@ -12,7 +12,7 @@ class Element {
 const ids = ['cam-ha-events','ha-entity-search','ha-entity-select','ha-event-type','ha-entity-add','ha-entities-load','ha-entities-status','ha-entity-mappings'];
 const els = Object.fromEntries(ids.map(id=>[id,new Element()]));
 let fail=false;
-const context={window:{},document:{getElementById:id=>els[id],createElement:()=>new Element()},Option:function(text,value){this.text=text;this.value=value;},t:key=>key,api:async()=>{if(fail)throw Error('offline');return {entities:[{entity_id:'binary_sensor.front',name:'Front person',state:'on'},{entity_id:'binary_sensor.back',name:'Back',state:'off'}]};}};
+const context={window:{},document:{getElementById:id=>els[id],createElement:()=>new Element()},Option:function(text,value){this.text=text;this.value=value;},t:key=>key,api:async()=>{if(fail)throw Error('ha_entities.unauthorized');return {entities:[{entity_id:'binary_sensor.front',name:'Front person',state:'on'},{entity_id:'binary_sensor.back',name:'Back',state:'off'}]};}};
 vm.runInNewContext(fs.readFileSync('ctv_web/js/event-picker.js','utf8'),context);
 (async()=>{
  await els['ha-entities-load'].onclick();
@@ -23,6 +23,7 @@ vm.runInNewContext(fs.readFileSync('ctv_web/js/event-picker.js','utf8'),context)
  els['ha-event-type'].value='person';els['ha-event-type'].onchange();els['ha-entity-add'].onclick();
  assert.equal(els['cam-ha-events'].value,'binary_sensor.front=person');
  fail=true;await els['ha-entities-load'].onclick();
+ assert.ok(els['ha-entities-status'].textContent.includes('ha_entities.unauthorized'));
  assert.equal(els['cam-ha-events'].value,'binary_sensor.front=person');
  context.window.CtvEventPicker.setMapping('binary_sensor.missing=motion');
  assert.ok(els['ha-entity-mappings'].children[0].children[0].textContent.includes('events.missing'));

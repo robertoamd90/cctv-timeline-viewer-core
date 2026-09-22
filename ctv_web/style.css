@@ -583,3 +583,13 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   color: #ffe1aa;
   flex-wrap: wrap;
 }
+
+.recording-events { position:absolute; top:0; left:3px; right:3px; overflow:hidden; white-space:nowrap; font-size:11px; background:#17212bcc; color:white; pointer-events:none; }
+
+.recording-events button { pointer-events:auto; font:inherit; color:inherit; background:#17212b; border:1px solid #8493a6; border-radius:3px; cursor:pointer; padding:2px 4px; }
+
+.ha-event-picker { min-width:0; margin-top:12px; }
+.ha-event-picker select, .ha-event-picker input { width:100%; min-width:0; }
+#ha-entity-mappings { padding-left:18px; overflow-wrap:anywhere; }
+#ha-entity-mappings li { margin:8px 0; }
+#ha-entity-mappings button { margin-left:8px; }

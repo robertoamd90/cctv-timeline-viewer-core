@@ -1,10 +1,21 @@
 """Modelli Pydantic per validazione richieste API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 
-class CameraCreate(BaseModel):
+class EventMapping(BaseModel):
+    ha_event_entities: str = Field(default="", max_length=4096)
+
+    @field_validator("ha_event_entities")
+    @classmethod
+    def validate_event_entities(cls, value):
+        from ctv_server.recording_events import parse_mapping
+        parse_mapping(value)
+        return value.strip()
+
+
+class CameraCreate(EventMapping):
     name: str = Field(..., min_length=1, max_length=255, description="Nome della telecamera")
     source_path: str = Field(..., min_length=1, description="Percorso sorgente delle registrazioni")
     timezone: str = Field(default="", description="Timezone (es. Europe/Rome). Vuoto = auto-detect dal sistema")
@@ -13,7 +24,7 @@ class CameraCreate(BaseModel):
     directory_pattern: str = Field(default="{YYYY}/{MM}/{DD}", min_length=1)
 
 
-class CameraUpdate(BaseModel):
+class CameraUpdate(EventMapping):
     name: str = Field(..., min_length=1, max_length=255)
     source_path: str = Field(..., min_length=1)
     timezone: str = Field(..., min_length=1)
@@ -22,7 +33,7 @@ class CameraUpdate(BaseModel):
     directory_pattern: str = Field(default="{YYYY}/{MM}/{DD}", min_length=1)
 
 
-class CameraResponse(BaseModel):
+class CameraResponse(EventMapping):
     id: int
     name: str
     source_path: str

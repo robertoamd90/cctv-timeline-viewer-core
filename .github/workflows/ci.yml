@@ -40,6 +40,8 @@ jobs:
           node tests/test_media.js
           node tests/test_player_recovery.js
           node tests/test_camera_form.js
+          node --check ctv_web/js/event-picker.js
+          node tests/test_event_picker.js
           python -m py_compile \
             scripts/create_release_request.py \
             scripts/render_local_addon.py \

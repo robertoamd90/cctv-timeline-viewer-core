@@ -1,5 +1,6 @@
 import json
 import socket
+from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
 from ctv_server.ha_client import get_json, HAError
@@ -74,3 +75,19 @@ class HAClientTests(unittest.TestCase):
         self.assertIn(b'GET /core/api/states HTTP/1.1\r\n',wire.sent)
         self.assertIn(b'Authorization: Bearer test-token\r\n',wire.sent)
         self.assertIn(b'Content-Type: application/json\r\n',wire.sent)
+
+
+class HASandboxProfileTests(unittest.TestCase):
+    def test_dns_nameservice_is_allowed_in_shipped_home_assistant_profile(self):
+        profile = (Path(__file__).resolve().parents[1] /
+                   'packaging/homeassistant/apparmor.txt').read_text(encoding='utf-8')
+        self.assertIn('#include <abstractions/nameservice>', profile)
+        self.assertIn('network inet dgram,', profile)
+        self.assertIn('network inet stream,', profile)
+
+    def test_no_hardcoded_supervisor_address(self):
+        from ctv_server import ha_client
+        import inspect
+        client = inspect.getsource(ha_client.get_json)
+        self.assertIn("HTTPConnection('supervisor', 80", client)
+        self.assertNotIn('172.30.32.2', client)

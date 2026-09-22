@@ -155,8 +155,9 @@ function renderRows(vFrom, vTo, segW, rW) {
         return `<div class="timeline-seg" style="left:${left}px;width:${spx}px;background:${color};"
           data-recording-id="${s.id}" data-start="${s.start_ts}" data-end="${s.end_ts||''}"
           data-camera="${escAttr(cam.camera_name)}" data-filename="${escAttr(s.filename)}"
-          data-thumb="${s.has_thumbnail?'1':'0'}">
+          data-thumb="${s.has_thumbnail?'1':'0'}" data-events="${escAttr(JSON.stringify(s.events || []))}" data-events-status="${escAttr(s.events_status || 'disabled')}">
           ${thumbHtml}
+          <span class="recording-events">${[...new Set((s.events || []).map(e => e.type))].map(kind => `<button type="button" data-event-ts="${s.events.find(e => e.type === kind).timestamp}" title="${escAttr(t('events.seek'))}">${esc(t('events.' + kind))}</button>`).join(' ')}</span>
           <div class="seg-info">${esc(s.filename)}${dur>0?' &middot; '+dur.toFixed(0)+'s':''}</div>
         </div>`;
       }).join('');
@@ -223,6 +224,11 @@ function showSegTooltip(e, segment = e.currentTarget) {
   h += `<div class="tt-name">${esc(s.dataset.camera)} &middot; ${esc(s.dataset.filename)}</div>`;
   const st = parseFloat(s.dataset.start), en = s.dataset.end ? parseFloat(s.dataset.end) : null;
   h += `<div class="tt-meta">${fmtTime(st)}${en ? ' → '+fmtTimeShort(en) : ''}</div>`;
+  const events = JSON.parse(s.dataset.events || '[]');
+  if (s.dataset.eventsStatus !== 'disabled') {
+    h += `<div>${esc(t('events.' + s.dataset.eventsStatus))}</div>`;
+    h += events.map(event => `<div>${esc(t('events.' + event.type))} · ${fmtTime(event.timestamp)}</div>`).join('');
+  }
   h += `</div>`;
   _ttEl.innerHTML = h; _ttEl.style.display = 'block'; moveSegTooltip(e);
   const image = _ttEl.querySelector('img');
@@ -473,3 +479,15 @@ function jumpToBoundary(direction) {
   ensureTimelineTimeVisible(S.currentTime);
   syncAutoHotspotAtCurrentTime(); updateCursor(); updateTimeDisplay(); seekPlayersToTime();
 }
+
+// Event badges navigate independently of the segment's drag/seek gesture.
+timelineBody.addEventListener('pointerdown', e => {
+  if (e.target.closest('[data-event-ts]')) e.stopImmediatePropagation();
+}, true);
+timelineBody.addEventListener('click', e => {
+  const badge = e.target.closest('[data-event-ts]');
+  if (!badge) return;
+  e.stopImmediatePropagation();
+  const segment = badge.closest('.timeline-seg');
+  seekTo(Math.max(Number(segment.dataset.start), Number(badge.dataset.eventTs) - 10));
+}, true);

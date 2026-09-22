@@ -119,8 +119,8 @@ def create_camera(body: CameraCreate, _: CurrentUser = Depends(require_admin)) -
     with write_db() as conn:
         cur = conn.execute(
             "INSERT INTO cameras (name, source_path, timezone, time_offset_seconds, indexing_mode, "
-            "directory_pattern, source_status) VALUES (?, ?, ?, ?, ?, ?, 'online')",
-            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern),
+            "directory_pattern, ha_event_entities, source_status) VALUES (?, ?, ?, ?, ?, ?, ?, 'online')",
+            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern, body.ha_event_entities),
         )
         camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (cur.lastrowid,)).fetchone()
     return CameraResponse(**dict(camera))
@@ -150,10 +150,10 @@ def update_camera(
             thumbnails = _delete_camera_index_data(conn, camera_id)
         cur = conn.execute(
             "UPDATE cameras SET name = ?, source_path = ?, timezone = ?, time_offset_seconds = ?, "
-            "indexing_mode = ?, directory_pattern = ?, "
+            "indexing_mode = ?, directory_pattern = ?, ha_event_entities = ?, "
             "source_status = ?, source_error = ? WHERE id = ?",
             (body.name.strip(), source_path, tz, body.time_offset_seconds,
-             body.indexing_mode, pattern,
+             body.indexing_mode, pattern, body.ha_event_entities,
              "unknown" if cache_changed else previous["source_status"],
              None if cache_changed else previous["source_error"], camera_id),
         )

@@ -280,6 +280,7 @@ def init_db():
     # Migrazioni additive per database creati dalle versioni PoC.
     _add_columns(conn, "cameras", (
         "time_offset_seconds REAL NOT NULL DEFAULT 0",
+        "ha_event_entities TEXT NOT NULL DEFAULT ''",
         "indexing_mode TEXT NOT NULL DEFAULT 'partitioned'",
         "directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}'",
         "source_status TEXT NOT NULL DEFAULT 'unknown'",
@@ -288,6 +289,10 @@ def init_db():
         "last_scan_completed REAL",
     ))
     _add_columns(conn, "recordings", (
+        "ha_events TEXT NOT NULL DEFAULT '[]'",
+        "ha_events_status TEXT NOT NULL DEFAULT 'pending'",
+        "ha_events_checked REAL",
+        "ha_events_signature TEXT",
         "mtime REAL",
         "partition_key TEXT",
         "media_kind TEXT NOT NULL DEFAULT 'video'",

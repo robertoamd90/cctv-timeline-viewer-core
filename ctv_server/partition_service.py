@@ -202,6 +202,10 @@ def run_partition_scan(
             args=(camera_id, key, job_generation),
             daemon=True,
         ).start()
+        # Enrichment is optional: its failure must not invalidate a successful scan.
+        from ctv_server.recording_events import enrich_partition
+        enrich_partition(camera_id, key, job_generation)
+        emit("recording_events", {"camera_id": camera_id, "partition": key})
         return payload
     except Exception as exc:
         details = sqlite_error_details(exc) if isinstance(exc, sqlite3.Error) else str(exc)

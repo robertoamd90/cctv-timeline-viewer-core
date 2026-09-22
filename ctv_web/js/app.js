@@ -740,6 +740,7 @@ function selectCamera(id) {
   document.getElementById('cam-time-offset').value = Math.abs(timeOffset);
   document.getElementById('cam-indexing-mode').value = camera.indexing_mode || 'partitioned';
   document.getElementById('cam-pattern').value = camera.directory_pattern || '{YYYY}/{MM}/{DD}';
+  window.CtvEventPicker.setMapping(camera.ha_event_entities || '');
   document.getElementById('btn-add-cam').textContent = t('cameras.save');
   document.getElementById('btn-cancel-edit').hidden = false;
   renderCamList();
@@ -755,6 +756,7 @@ function resetCameraForm() {
   document.getElementById('cam-time-offset').value = 0;
   document.getElementById('cam-indexing-mode').value = 'partitioned';
   document.getElementById('cam-pattern').value = '{YYYY}/{MM}/{DD}';
+  window.CtvEventPicker.setMapping('');
   document.getElementById('btn-add-cam').textContent = t('cameras.addAction');
   document.getElementById('btn-cancel-edit').hidden = true;
   renderCamList();
@@ -999,6 +1001,7 @@ document.addEventListener('keydown', e => {
 
 // ═══ SSE ═══
 const evtSource = new EventSource(appUrl('/api/events'));
+evtSource.addEventListener('recording_events', () => loadTimeline(undefined, undefined, false));
 evtSource.addEventListener('scan', e => {
   const d = JSON.parse(e.data);
   const el = document.getElementById('topbar-status');
@@ -1077,6 +1080,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
         method: 'PUT', body: {
           name, source_path: path, timezone: tz, time_offset_seconds: timeOffset,
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
+          ha_event_entities: document.getElementById("cam-ha-events").value,
         }
       });
       if (indexingMode === 'full') await api('/api/scan/' + editingId, { method: 'POST' });
@@ -1086,6 +1090,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
         method: 'POST', body: {
           name, source_path: path, timezone: tz, time_offset_seconds: timeOffset,
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
+          ha_event_entities: document.getElementById("cam-ha-events").value,
         }
       });
       S.visibleCameraIds.push(camera.id);

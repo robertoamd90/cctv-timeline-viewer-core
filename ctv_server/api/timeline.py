@@ -1,4 +1,5 @@
 import math
+import json
 from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from ctv_server.db import get_db
@@ -140,7 +141,7 @@ def get_timeline(
 
     columns = (
         "r.id, r.camera_id, r.filename, r.start_ts, r.end_ts, "
-        "r.duration, r.media_kind, r.thumbnail_path"
+        "r.duration, r.media_kind, r.thumbnail_path, r.ha_events, r.ha_events_status"
     )
 
     # Camera offsets differ, so query each camera in its physical time range.
@@ -195,6 +196,8 @@ def get_timeline(
         for row in rows:
             segments.append({
                 "id": row["id"],
+                "events": json.loads(row["ha_events"]) if camera["ha_event_entities"] else [],
+                "events_status": row["ha_events_status"] if camera["ha_event_entities"] else "disabled",
                 "filename": row["filename"],
                 "start_ts": row["start_ts"] + offset,
                 "end_ts": row["end_ts"] + offset if row["end_ts"] is not None else None,

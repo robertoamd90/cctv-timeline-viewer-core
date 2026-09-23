@@ -2,6 +2,17 @@
 
 const CTV_TRANSLATIONS = {
   en: {
+    "events.filter": "Events",
+    "events.showAll": "Show all videos",
+    "events.noMatchingClips": "No matching videos for the displayed cameras",
+    "events.position": "Badge position on this camera’s video",
+    "events.top-left": "Top left",
+    "events.top-center": "Top center",
+    "events.top-right": "Top right",
+    "events.bottom-left": "Bottom left",
+    "events.bottom-center": "Bottom center",
+    "events.bottom-right": "Bottom right",
+
     "events.fieldsHelp": "One sensor per event. Changes are applied with Save camera.",
     "events.searchEntity": "Search for a sensor…",
     "events.noMatches": "No matching sensors",
@@ -213,6 +224,17 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
+    "events.filter": "Eventi",
+    "events.showAll": "Mostra tutti i video",
+    "events.noMatchingClips": "Nessun video corrispondente per le camere visualizzate",
+    "events.position": "Posizione dei bollini sul video di questa camera",
+    "events.top-left": "In alto a sinistra",
+    "events.top-center": "In alto al centro",
+    "events.top-right": "In alto a destra",
+    "events.bottom-left": "In basso a sinistra",
+    "events.bottom-center": "In basso al centro",
+    "events.bottom-right": "In basso a destra",
+
     "events.fieldsHelp": "Un sensore per evento. Le modifiche si applicano con Salva camera.",
     "events.searchEntity": "Cerca un sensore…",
     "events.noMatches": "Nessun sensore corrispondente",

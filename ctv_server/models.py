@@ -5,6 +5,7 @@ from typing import Optional
 
 
 class EventMapping(BaseModel):
+    event_overlay_position: str = Field(default="top-right", pattern="^(top|bottom)-(left|center|right)$")
     ha_event_entities: str = Field(default="", max_length=4096)
 
     @field_validator("ha_event_entities")

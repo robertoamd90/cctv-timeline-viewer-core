@@ -47,7 +47,7 @@ class RecordingEventsTests(unittest.TestCase):
             enrich_partition(self.camera,'2026-01-01',index_generation())
         self.assertEqual(fetch.call_count, 1)
         rows = self.rows()
-        self.assertEqual(json.loads(rows[0]['ha_events']),[{'type':'person','timestamp':self.ts+70}])
+        self.assertEqual(json.loads(rows[0]['ha_events']),[{'type':'person','timestamp':self.ts+70,'end_timestamp':self.ts+80}])
         self.assertEqual(json.loads(rows[1]['ha_events']),[{'type':'person','timestamp':self.ts+120}])
 
     def test_empty_response_is_not_proof_of_no_events(self):
@@ -81,7 +81,7 @@ class RecordingEventsTests(unittest.TestCase):
 
     def test_carry_in_state_and_attributes_do_not_create_events(self):
         result = extract_events(self.history(), {'binary_sensor.person':'person'},self.ts+75,self.ts+130)
-        self.assertEqual(result,[{'type':'person','timestamp':self.ts+120}])
+        self.assertEqual(result,[{'type':'person','timestamp':self.ts+70,'end_timestamp':self.ts+80}, {'type':'person','timestamp':self.ts+120}])
 
     def test_mapping_validation(self):
         for invalid in ['sensor.a=person','binary_sensor.a=unknown','binary_sensor.a=person\nbinary_sensor.a=motion']:
@@ -149,5 +149,28 @@ class RecordingEventsTests(unittest.TestCase):
         timeline=get_timeline(self.ts,self.ts+300,str(self.camera))
         segment=timeline['cameras'][0]['segments'][0]
         self.assertTrue(segment['has_thumbnail'])
-        self.assertEqual(segment['events'],[{'type':'person','timestamp':self.ts+70}])
+        self.assertEqual(segment['events'],[{'type':'person','timestamp':self.ts+70,'end_timestamp':self.ts+80}])
         self.assertEqual(segment['events_status'],'found')
+
+    def test_duration_crosses_clip_boundary_and_unknown_end_falls_back(self):
+        def state(value, offset):
+            return {'entity_id':'binary_sensor.person','state':value,'last_changed':datetime.fromtimestamp(self.ts+offset,timezone.utc).isoformat()}
+        history=[[state('on',110),state('off',130),state('on',170),state('unavailable',171)]]
+        with patch('ctv_server.recording_events.fetch_history',return_value=history):
+            enrich_partition(self.camera,'2026-01-01',index_generation())
+        first,second=self.rows()
+        event={'type':'person','timestamp':self.ts+110,'end_timestamp':self.ts+130}
+        self.assertEqual(json.loads(first['ha_events']),[event])
+        self.assertEqual(json.loads(second['ha_events']),[event,{'type':'person','timestamp':self.ts+170}])
+        self.assertEqual(second['ha_events_version'],2)
+
+    def test_overlay_position_roundtrip_and_validation(self):
+        from ctv_server.api.cameras import create_camera, update_camera
+        from ctv_server.models import CameraCreate, CameraUpdate
+        from pydantic import ValidationError
+        camera=create_camera(CameraCreate(name='Overlay',source_path=self.tmp.name,timezone='UTC',event_overlay_position='bottom-center'))
+        self.assertEqual(camera.event_overlay_position,'bottom-center')
+        camera=update_camera(camera.id,CameraUpdate(name='Overlay',source_path=self.tmp.name,timezone='UTC',event_overlay_position='top-left'))
+        self.assertEqual(camera.event_overlay_position,'top-left')
+        with self.assertRaises(ValidationError):
+            CameraCreate(name='Bad',source_path=self.tmp.name,event_overlay_position='invalid')

@@ -612,3 +612,19 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
 .event-suggestions small { color:var(--text-dim); font-size:11px; margin-top:3px; }
 .event-no-results { padding:10px; color:var(--text-dim); font-size:12px; }
 #ha-entities-status { font-size:12px; color:var(--text-dim); margin-top:8px; }
+
+#event-filter-wrap { position:relative; }
+#event-filter-menu { position:absolute; top:calc(100% + 5px); left:0; min-width:170px; z-index:100; background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:8px; box-shadow:0 6px 18px #0006; }
+#event-filter-menu svg { width:18px; height:18px; display:block; }
+#cam-event-position { width:100%; margin-top:5px; }
+label[for=cam-event-position] { display:block; margin-top:16px; }
+.video-event-badges { position:absolute; z-index:5; display:flex; gap:5px; flex-wrap:wrap; max-width:90%; pointer-events:none; }
+.video-event-badges[hidden] { display:none; }
+.video-event-badges[data-position^=top] { top:36px; }
+.video-event-badges[data-position^=bottom] { bottom:14px; }
+.video-event-badges[data-position$=left] { left:10px; }
+.video-event-badges[data-position$=right] { right:10px; justify-content:flex-end; }
+.video-event-badges[data-position$=center] { left:50%; transform:translateX(-50%); justify-content:center; }
+.video-event-badge { display:flex; align-items:center; gap:5px; padding:5px 8px; border-radius:20px; background:#101923dd; color:white; border:1px solid #ffffff66; font-size:12px; box-shadow:0 2px 5px #0005; }
+.video-event-badge svg { width:18px; height:18px; flex-shrink:0; }
+@media(max-width:600px) { .video-event-badge {padding:4px;} .video-event-badge span {display:none;} }

@@ -43,6 +43,8 @@ jobs:
           node --check ctv_web/js/event-icons.js
           node --check ctv_web/js/event-picker.js
           node tests/test_event_picker.js
+          node tests/test_event_playback.js
+          node --check ctv_web/js/event-filter.js
           python -m py_compile \
             scripts/create_release_request.py \
             scripts/render_local_addon.py \

@@ -741,6 +741,7 @@ function selectCamera(id) {
   document.getElementById('cam-indexing-mode').value = camera.indexing_mode || 'partitioned';
   document.getElementById('cam-pattern').value = camera.directory_pattern || '{YYYY}/{MM}/{DD}';
   window.CtvEventPicker.setMapping(camera.ha_event_entities || '');
+  document.getElementById('cam-event-position').value = camera.event_overlay_position || 'top-right';
   document.getElementById('btn-add-cam').textContent = t('cameras.save');
   document.getElementById('btn-cancel-edit').hidden = false;
   renderCamList();
@@ -757,6 +758,7 @@ function resetCameraForm() {
   document.getElementById('cam-indexing-mode').value = 'partitioned';
   document.getElementById('cam-pattern').value = '{YYYY}/{MM}/{DD}';
   window.CtvEventPicker.setMapping('');
+  document.getElementById('cam-event-position').value = 'top-right';
   document.getElementById('btn-add-cam').textContent = t('cameras.addAction');
   document.getElementById('btn-cancel-edit').hidden = true;
   renderCamList();
@@ -812,7 +814,8 @@ async function loadTimeline(from, to, prepare = true) {
     if (cameraQuery) url += 'cameras=' + cameraQuery;
     const timeline = await api(url);
     if (requestId !== timelineLoadSequence) return;
-    S.timeline = timeline;
+    S.unfilteredTimeline = timeline;
+    S.timeline = CtvEventPlayback.filterTimeline(timeline, selectedEventTypes);
   } catch(e) { toast(t('cameras.errorTimeline'), 'error'); return; }
   if (!S.timeline || !S.timeline.cameras.length) {
     const range = selectedDayRange() || [0, 86400];
@@ -1093,6 +1096,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
           name, source_path: path, timezone: tz, time_offset_seconds: timeOffset,
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
           ha_event_entities: document.getElementById("cam-ha-events").value,
+          event_overlay_position: document.getElementById("cam-event-position").value,
         }
       });
       if (indexingMode === 'full') await api('/api/scan/' + editingId, { method: 'POST' });
@@ -1103,6 +1107,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
           name, source_path: path, timezone: tz, time_offset_seconds: timeOffset,
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
           ha_event_entities: document.getElementById("cam-ha-events").value,
+          event_overlay_position: document.getElementById("cam-event-position").value,
         }
       });
       savedCameraId = camera.id;
@@ -1184,6 +1189,7 @@ document.getElementById('btn-rebuild-index').onclick = async () => {
     const result = await api('/api/admin/rebuild-index', { method: 'POST' });
     stopPlayback();
     S.timeline = null;
+    S.unfilteredTimeline = null;
     S.currentTime = null;
     S.zoomRange = null;
     S.loadingPartitions = 0;
@@ -1305,6 +1311,7 @@ window._ctvInit = function() {
 
 window._ctvRefreshLanguage = function() {
   window.CtvEventPicker?.refreshLabels();
+  renderEventFilter();
   document.getElementById('camera-form-title').textContent =
     t(S.editingCameraId ? 'cameras.edit' : 'cameras.add');
   document.getElementById('btn-add-cam').textContent =

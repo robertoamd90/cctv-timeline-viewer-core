@@ -159,6 +159,10 @@ def update_camera(
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Camera not found")
+        if (previous["ha_event_entities"] != body.ha_event_entities or
+                previous["time_offset_seconds"] != body.time_offset_seconds):
+            # A new association must enrich even a recently indexed day.
+            conn.execute("UPDATE partitions SET last_scanned = NULL WHERE camera_id = ?", (camera_id,))
         camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone()
     for thumbnail in thumbnails:
         try:

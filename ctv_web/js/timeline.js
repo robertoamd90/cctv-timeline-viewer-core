@@ -152,12 +152,12 @@ function renderRows(vFrom, vTo, segW, rW) {
         if (s.has_thumbnail && spx > 50) {
           thumbHtml = `<img class="seg-thumb" loading="lazy" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.id}/thumbnail`))}">`;
         }
-        return `<div class="timeline-seg" style="left:${left}px;width:${spx}px;background:${color};"
+        return `<div class="timeline-seg${s.events?.length ? ' has-events' : ''}" style="left:${left}px;width:${spx}px;background:${color};"
           data-recording-id="${s.id}" data-start="${s.start_ts}" data-end="${s.end_ts||''}"
           data-camera="${escAttr(cam.camera_name)}" data-filename="${escAttr(s.filename)}"
           data-thumb="${s.has_thumbnail?'1':'0'}" data-events="${escAttr(JSON.stringify(s.events || []))}" data-events-status="${escAttr(s.events_status || 'disabled')}">
           ${thumbHtml}
-          <span class="recording-events">${[...new Set((s.events || []).map(e => e.type))].map(kind => `<button type="button" data-event-ts="${s.events.find(e => e.type === kind).timestamp}" title="${escAttr(t('events.seek'))}">${esc(t('events.' + kind))}</button>`).join(' ')}</span>
+          <span class="recording-events">${[...new Set((s.events || []).map(e => e.type))].map(kind => `<button type="button" data-event-ts="${s.events.find(e => e.type === kind).timestamp}" aria-label="${escAttr(t('events.' + kind))}" title="${escAttr(t('events.' + kind) + ' · ' + t('events.seek'))}">${window.CtvEventIcons.svg(kind)}</button>`).join(' ')}</span>
           <div class="seg-info">${esc(s.filename)}${dur>0?' &middot; '+dur.toFixed(0)+'s':''}</div>
         </div>`;
       }).join('');

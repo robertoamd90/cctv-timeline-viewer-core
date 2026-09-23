@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=0.1.28-events-poc3">
+<link rel="stylesheet" href="style.css?v=0.1.28-events-fields1">
 </head>
 <body>
 
@@ -175,24 +175,10 @@
         <fieldset class="ha-event-picker">
           <legend data-i18n="events.mapping">HA events</legend>
           <input type="hidden" id="cam-ha-events">
-          <button type="button" id="ha-entities-load" data-i18n="events.load">Load / refresh HA entities</button>
-          <label for="ha-entity-search" data-i18n="events.search">Search by name or entity ID</label>
-          <input type="search" id="ha-entity-search" disabled>
-          <label for="ha-entity-select" data-i18n="events.entity">Home Assistant entity</label>
-          <select id="ha-entity-select" disabled></select>
-          <label for="ha-event-type" data-i18n="events.type">Event type</label>
-          <select id="ha-event-type">
-            <option value="" data-i18n="events.chooseType">Choose a type</option>
-            <option value="person" data-i18n="events.person">Person</option>
-            <option value="vehicle" data-i18n="events.vehicle">Vehicle</option>
-            <option value="animal" data-i18n="events.animal">Animal</option>
-            <option value="motion" data-i18n="events.motion">Motion</option>
-            <option value="doorbell" data-i18n="events.doorbell">Doorbell</option>
-          </select>
-          <button type="button" id="ha-entity-add" disabled data-i18n="events.add">Add association</button>
+          <p class="event-picker-help" data-i18n="events.fieldsHelp">One sensor per event. Changes are applied when you save the camera.</p>
+          <div id="ha-event-fields"></div>
           <div id="ha-entities-status" role="status" aria-live="polite"></div>
-          <ul id="ha-entity-mappings"></ul>
-          <small data-i18n="events.pickerHelp">Select the sensor and its event type, then save the camera. Daily indexing only.</small>
+          <button type="button" id="ha-entities-retry" hidden data-i18n="events.retry">Retry loading entities</button>
         </fieldset>
         <div class="hint" data-i18n="cameras.tokens">Tokens: {YYYY}, {YY}, {MM}, {DD}</div>
         <div class="form-actions">
@@ -290,13 +276,14 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=0.1.28-events-poc3"></script>
+<script src="js/i18n.js?v=0.1.28-events-fields1"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
 <script src="js/media.js?v=0.1.29-remote1"></script>
-<script src="js/app.js?v=0.1.28-events-poc3"></script>
-<script src="js/event-picker.js?v=events-poc3"></script>
-<script src="js/timeline.js?v=0.1.28-events-poc3"></script>
+<script src="js/app.js?v=0.1.28-events-fields1"></script>
+<script src="js/event-icons.js?v=events-fields1"></script>
+<script src="js/event-picker.js?v=events-fields1"></script>
+<script src="js/timeline.js?v=0.1.28-events-fields1"></script>
 <script src="js/player.js?v=0.1.35-remote1"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);

@@ -2,6 +2,12 @@
 
 const CTV_TRANSLATIONS = {
   en: {
+    "events.fieldsHelp": "One sensor per event. Changes are applied with Save camera.",
+    "events.searchEntity": "Search for a sensor…",
+    "events.noMatches": "No matching sensors",
+    "events.retry": "Retry loading entities",
+    "events.legacyMultiple": "Multiple existing associations: clear to replace with one sensor.",
+
     "ha_entities.missing_token": "Supervisor token missing. Restart the add-on.",
     "ha_entities.unauthorized": "Home Assistant API access denied (401/403).",
     "ha_entities.http_error": "Supervisor returned an HTTP error; see add-on logs for the status.",
@@ -207,6 +213,12 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
+    "events.fieldsHelp": "Un sensore per evento. Le modifiche si applicano con Salva camera.",
+    "events.searchEntity": "Cerca un sensore…",
+    "events.noMatches": "Nessun sensore corrispondente",
+    "events.retry": "Riprova a caricare le entità",
+    "events.legacyMultiple": "Più associazioni esistenti: svuota il campo per scegliere un solo sensore.",
+
     "ha_entities.missing_token": "Token Supervisor assente. Riavvia l’add-on.",
     "ha_entities.unauthorized": "Accesso API Home Assistant negato (401/403).",
     "ha_entities.http_error": "Il Supervisor ha restituito un errore HTTP; il codice è nei log dell’add-on.",

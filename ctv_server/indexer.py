@@ -24,6 +24,7 @@ def index_camera(
     partition_key: Optional[str] = None,
     purge_missing: bool = False,
     progress: Optional[Callable[[int, int], None]] = None,
+    incremental: bool = False,
 ):
     """Riconcilia una sorgente senza perdere gli ID delle registrazioni."""
     conn = get_db()
@@ -32,24 +33,28 @@ def index_camera(
         if timezone == "UTC":
             if cam and cam["timezone"]:
                 timezone = cam["timezone"]
-        existing_query = "SELECT path, size, mtime FROM recordings WHERE camera_id = ?"
+        existing_query = "SELECT path, size, mtime, duration, autoscan_settled FROM recordings WHERE camera_id = ?"
         existing_params: tuple = (camera_id,)
         if partition_key is not None:
             existing_query += " AND partition_key = ?"
             existing_params += (partition_key,)
         existing = {
-            row["path"]: (row["size"], row["mtime"])
+            row["path"]: (row["size"], row["mtime"], row["duration"], row["autoscan_settled"])
             for row in conn.execute(existing_query, existing_params)
         }
     finally:
         conn.close()
 
     # Fallire qui significa sorgente offline: non cambiare l'indice esistente.
-    files = scan_directory(source_path)
+    scan_started = time.monotonic()
+    settled = {path for path, data in existing.items() if data[3]} if incremental else set()
+    files = scan_directory(source_path, skip_paths=settled) if incremental else scan_directory(source_path)
+    listing_seconds = time.monotonic() - scan_started
     scan_time = time.time()
     scan_marker = f"scan:{time.time_ns()}:{threading.get_ident()}"
     counts = {"new": 0, "updated": 0, "missing": 0, "skipped": 0, "total": len(files)}
     skipped_paths = []
+    newly_settled = []
     prepared = []
 
     # Tutto il lavoro lento avviene senza una transazione SQLite aperta.
@@ -57,8 +62,10 @@ def index_camera(
     for media in files:
         previous = existing.get(media["path"])
         same_mtime = previous and previous[1] is not None and abs(previous[1] - media["mtime"]) < 0.001
-        if previous and previous[0] == media["size"] and same_mtime:
+        if previous and previous[0] == media["size"] and same_mtime and (not incremental or previous[2]):
             skipped_paths.append(media["path"])
+            if incremental and scan_time - media["mtime"] >= 120:
+                newly_settled.append(media["path"])
             counts["skipped"] += 1
             continue
         changed_media.append(media)
@@ -80,7 +87,7 @@ def index_camera(
             media["size"], media["mtime"], file_hash, partition_key, media_kind, scan_marker,
         )
 
-    workers = max(1, int(os.environ.get("CTV_INDEX_WORKERS", "4")))
+    workers = 1 if incremental else max(1, int(os.environ.get("CTV_INDEX_WORKERS", "4")))
     done = counts["skipped"]
     with ThreadPoolExecutor(max_workers=workers) as executor:
         media_iterator = iter(changed_media)
@@ -127,7 +134,7 @@ def index_camera(
         conn.executemany(
             "UPDATE recordings SET availability = 'available', last_seen = ? "
             "WHERE camera_id = ? AND path = ?",
-            ((scan_marker, camera_id, path) for path in skipped_paths),
+            ((scan_marker, camera_id, path) for path in skipped_paths if not incremental),
         )
         conn.executemany("""
                 INSERT INTO recordings (
@@ -142,10 +149,12 @@ def index_camera(
                     fps=excluded.fps, size=excluded.size, mtime=excluded.mtime, hash=excluded.hash,
                     partition_key=excluded.partition_key,
                     media_kind=excluded.media_kind,
-                    availability='available', last_seen=excluded.last_seen
+                    availability='available', last_seen=excluded.last_seen, autoscan_settled=0
             """, prepared)
 
-        missing_rows = conn.execute(
+        conn.executemany("UPDATE recordings SET autoscan_settled=1 WHERE camera_id=? AND path=?",
+                         ((camera_id, path) for path in newly_settled))
+        missing_rows = [] if incremental else conn.execute(
             f"SELECT id, thumbnail_path FROM recordings WHERE {scope} "
             "AND availability = 'available' AND last_seen IS NOT ?",
             (*scope_params, scan_marker),
@@ -174,4 +183,8 @@ def index_camera(
             os.unlink(thumbnail)
         except OSError:
             pass
+    if incremental:
+        log.info("Autoscan camera=%s day=%s settled=%d inspected=%d new=%d updated=%d listing=%.3fs total=%.3fs",
+                 camera_id, partition_key, len(settled), len(files), counts["new"], counts["updated"],
+                 listing_seconds, time.monotonic()-scan_started)
     return counts

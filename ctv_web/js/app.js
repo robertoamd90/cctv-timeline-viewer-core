@@ -742,6 +742,9 @@ function selectCamera(id) {
   document.getElementById('cam-pattern').value = camera.directory_pattern || '{YYYY}/{MM}/{DD}';
   window.CtvEventPicker.setMapping(camera.ha_event_entities || '');
   document.getElementById('cam-event-position').value = camera.event_overlay_position || 'top-right';
+  document.getElementById('cam-autoscan-enabled').checked = Boolean(camera.autoscan_enabled);
+  document.getElementById('cam-autoscan-interval').value = camera.autoscan_interval_minutes || 60;
+  updateAutoscanControls();
   document.getElementById('btn-add-cam').textContent = t('cameras.save');
   document.getElementById('btn-cancel-edit').hidden = false;
   renderCamList();
@@ -759,10 +762,23 @@ function resetCameraForm() {
   document.getElementById('cam-pattern').value = '{YYYY}/{MM}/{DD}';
   window.CtvEventPicker.setMapping('');
   document.getElementById('cam-event-position').value = 'top-right';
+  document.getElementById('cam-autoscan-enabled').checked = false;
+  document.getElementById('cam-autoscan-interval').value = 60;
+  updateAutoscanControls();
   document.getElementById('btn-add-cam').textContent = t('cameras.addAction');
   document.getElementById('btn-cancel-edit').hidden = true;
   renderCamList();
 }
+
+function updateAutoscanControls() {
+  const supported = document.getElementById('cam-indexing-mode').value === 'partitioned';
+  const enabled = document.getElementById('cam-autoscan-enabled');
+  enabled.disabled = !supported;
+  document.getElementById('cam-autoscan-interval').disabled = !supported || !enabled.checked;
+  document.getElementById('cam-autoscan-unavailable').hidden = supported;
+}
+document.getElementById('cam-indexing-mode').addEventListener('change', updateAutoscanControls);
+document.getElementById('cam-autoscan-enabled').addEventListener('change', updateAutoscanControls);
 
 document.getElementById('btn-cancel-edit').onclick = resetCameraForm;
 
@@ -1087,6 +1103,11 @@ document.getElementById('btn-add-cam').onclick = async () => {
   if (!Number.isFinite(timeOffsetMagnitude) || timeOffsetMagnitude < 0 || timeOffsetMagnitude > 3600) {
     toast(t('cameras.invalidTimeOffset'), 'error'); return;
   }
+  const autoscanEnabled = indexingMode === 'partitioned' && document.getElementById('cam-autoscan-enabled').checked;
+  const autoscanInterval = Number(document.getElementById('cam-autoscan-interval').value);
+  if (!Number.isInteger(autoscanInterval) || autoscanInterval < 1 || autoscanInterval > 10080) {
+    toast(t('autoscan.invalidInterval'), 'error'); return;
+  }
   let savedCameraId = S.editingCameraId;
   try {
     if (S.editingCameraId) {
@@ -1097,6 +1118,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
           ha_event_entities: document.getElementById("cam-ha-events").value,
           event_overlay_position: document.getElementById("cam-event-position").value,
+          autoscan_enabled: autoscanEnabled, autoscan_interval_minutes: autoscanInterval,
         }
       });
       if (indexingMode === 'full') await api('/api/scan/' + editingId, { method: 'POST' });
@@ -1108,6 +1130,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
           indexing_mode: indexingMode, directory_pattern: directoryPattern,
           ha_event_entities: document.getElementById("cam-ha-events").value,
           event_overlay_position: document.getElementById("cam-event-position").value,
+          autoscan_enabled: autoscanEnabled, autoscan_interval_minutes: autoscanInterval,
         }
       });
       savedCameraId = camera.id;

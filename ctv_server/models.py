@@ -5,6 +5,8 @@ from typing import Optional
 
 
 class EventMapping(BaseModel):
+    autoscan_enabled: bool = False
+    autoscan_interval_minutes: int = Field(default=60, ge=1, le=10080)
     event_overlay_position: str = Field(default="top-right", pattern="^(top|bottom)-(left|center|right)$")
     ha_event_entities: str = Field(default="", max_length=4096)
 

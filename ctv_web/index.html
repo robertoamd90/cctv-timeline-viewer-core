@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=event-mobile2">
+<link rel="stylesheet" href="style.css?v=autoscan1">
 </head>
 <body>
 
@@ -176,6 +176,14 @@
         </select>
         <label for="cam-pattern" style="margin-top:6px;" data-i18n="cameras.directoryPattern">Directory pattern</label>
         <input type="text" id="cam-pattern" value="{YYYY}/{MM}/{DD}">
+        <fieldset id="cam-autoscan-settings" class="ha-event-picker">
+          <legend data-i18n="autoscan.title">Automatic indexing</legend>
+          <label class="autoscan-toggle"><input type="checkbox" id="cam-autoscan-enabled"><span data-i18n="autoscan.enabled">Index today in the background</span></label>
+          <label for="cam-autoscan-interval" data-i18n="autoscan.interval">Interval (minutes)</label>
+          <input type="number" id="cam-autoscan-interval" min="1" max="10080" step="1" value="60" disabled>
+          <p class="hint" data-i18n="autoscan.help">Only today, in this camera’s timezone. Each run lists the day’s filenames; only new or unsettled videos are inspected. Runs even when the app is closed. Save the camera to apply.</p>
+          <p class="hint" id="cam-autoscan-unavailable" data-i18n="autoscan.partitionedOnly" hidden>Available only with date-partitioned indexing.</p>
+        </fieldset>
         <fieldset class="ha-event-picker">
           <legend data-i18n="events.mapping">HA events</legend>
           <input type="hidden" id="cam-ha-events">
@@ -289,12 +297,12 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=event-playback1"></script>
+<script src="js/i18n.js?v=autoscan1"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
 <script src="js/media.js?v=0.1.29-remote1"></script>
 <script src="js/event-playback.js?v=event-playback1"></script>
-<script src="js/app.js?v=event-playback1"></script>
+<script src="js/app.js?v=autoscan1"></script>
 <script src="js/event-icons.js?v=event-playback1"></script>
 <script src="js/event-picker.js?v=event-playback1"></script>
 <script src="js/event-filter.js?v=event-playback1"></script>

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.30
+
+### Optional current-day automatic indexing
+
+- Configure background indexing and its interval separately for each camera;
+  default off with a 60-minute interval. Apply changes with Save camera.
+- Scan only the current day in each camera’s timezone, even with no browser open.
+  Preserve schedules across restart and recover interrupted partition jobs.
+- List filenames but skip metadata reads and probing for confirmed stable files;
+  retry new or growing files and failed duration probes using one probe worker.
+- Serialize partition scans and prioritize interactive requests. Retain full
+  reconciliation when a day is opened, without background historical scans.
+- Associate HA events during scheduled scans, respect retry intervals on NAS
+  failures, and log indexing workload and timing.
+- Replace the implicit recently-viewed-partition watcher with explicit schedules.
+
 ## 0.1.29
 
 ### Home Assistant detection events

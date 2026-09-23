@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown events."""
     log.info("Initializing database…")
     init_db()
+    from ctv_server.autoscan import recover_interrupted_scans
+    recover_interrupted_scans()
     _autodiscover_test_dir()
     # Avvia scansione periodica in background
     _watcher_task = asyncio.create_task(_background_watcher())
@@ -384,29 +386,18 @@ def _autodiscover_test_dir():
 # Background watcher: riscansione periodica per nuovi file
 # ═══════════════════════════════════════════════════════════════
 
-_WATCHER_INTERVAL = int(os.environ.get("CTV_WATCHER_SECONDS", "60"))
-
 async def _background_watcher():
-    """Aggiorna solo le partizioni usate di recente, mai l'intero archivio."""
-    await asyncio.sleep(10)  # aspetta 10s dopo lo startup prima della prima scansione
-    from ctv_server.partition_service import run_partition_scan
-
-    while True:
-        try:
-            conn = get_db()
-            active_since = time.time() - max(_WATCHER_INTERVAL * 3, 300)
-            partitions = conn.execute("""
-                SELECT camera_id, partition_key, path FROM partitions
-                WHERE last_requested >= ?
-            """, (active_since,)).fetchall()
-            conn.close()
-            for partition in partitions:
-                await asyncio.to_thread(
-                    run_partition_scan,
-                    partition["camera_id"],
-                    partition["partition_key"],
-                    partition["path"],
-                )
-        except Exception as exc:
-            log.error("Watcher error: %s", exc)
-        await asyncio.sleep(_WATCHER_INTERVAL)
+    """Run per-camera current-day schedules independently of browser activity."""
+    from ctv_server.autoscan import run_due_autoscans
+    import threading
+    stop = threading.Event()
+    try:
+        await asyncio.sleep(10)
+        while True:
+            try:
+                await asyncio.to_thread(run_due_autoscans, stop)
+            except Exception as exc:
+                log.error("Autoscan error: %s", exc)
+            await asyncio.sleep(10)
+    finally:
+        stop.set()

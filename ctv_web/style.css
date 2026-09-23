@@ -629,3 +629,6 @@ label[for=cam-event-position] { display:block; margin-top:16px; }
 .video-event-badge { display:flex; align-items:center; gap:5px; padding:5px 8px; border-radius:20px; background:#101923dd; color:white; border:1px solid #ffffff66; font-size:12px; box-shadow:0 2px 5px #0005; }
 .video-event-badge svg { width:18px; height:18px; flex-shrink:0; }
 @media(max-width:600px) { .video-event-badge {padding:4px;} .video-event-badge span {display:none;} }
+
+.autoscan-toggle { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.autoscan-toggle input { width:auto; margin:0; flex-shrink:0; }

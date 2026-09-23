@@ -490,19 +490,20 @@ button.danger:hover { color: #fff; border-color: var(--danger); background: rgba
   .date-nav { grid-row: 2; grid-column: 1 / 4; width: 100%; min-width: 0; }
   #view-controls {
     display: grid; grid-row: 3; grid-column: 1 / 5;
-    grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.72fr);
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.7fr);
     align-items: center; gap: 5px; min-width: 0;
   }
   #layout-select { width: 100% !important; min-width: 0; }
-  #camera-filter-wrap, #stream-options-wrap { width: 100%; min-width: 0; }
+  #camera-filter-wrap, #event-filter-wrap, #stream-options-wrap { width: 100%; min-width: 0; }
   #auto-hotspot-control {
-    width: 100%; min-height: 42px; padding-inline: 9px;
+    width: 100%; min-height: 42px; padding-inline: 4px; gap: 3px;
     justify-self: stretch; justify-content: center;
   }
   #toolbar #auto-hotspot-control input { min-height: 14px; padding: 0; }
   .auto-hotspot-label-long { display: none; }
   .auto-hotspot-label-short { display: inline; }
-  #btn-camera-filter, #btn-stream-options {
+  #toolbar #btn-camera-filter, #toolbar #btn-event-filter, #toolbar #btn-stream-options {
+    padding-inline: 4px;
     width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .date-nav input { flex: 1 1 0; width: 0 !important; min-width: 0; padding-inline: 3px !important; }

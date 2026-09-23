@@ -16,7 +16,7 @@ assert(html.includes('id="btn-mobile-toolbar-toggle"'));
 assert(/id="zoom-controls"[\s\S]*id="btn-mobile-toolbar-toggle"[\s\S]*<\/div>/.test(html));
 
 assert(css.includes('display: grid; grid-row: 3; grid-column: 1 / 5;'));
-assert(css.includes('grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.72fr);'));
+assert(css.includes('grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.7fr);'));
 assert(css.includes('#stream-options-menu { position: fixed;'));
 assert(!css.includes('#auto-hotspot-control { grid-row: 4;'));
 assert(css.includes('#toolbar #auto-hotspot-control input { min-height: 14px; padding: 0; }'));

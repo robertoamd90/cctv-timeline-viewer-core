@@ -1076,7 +1076,12 @@ function updateEventOverlays() {
       const imageWidth = video.videoWidth*scale, imageHeight = video.videoHeight*scale;
       const x = video.offsetLeft+(width-imageWidth)/2, y = video.offsetTop+(height-imageHeight)/2;
       const [vertical,horizontal] = overlay.dataset.position.split('-');
-      overlay.style.top = vertical === 'top' ? `${Math.max(30,y+8)}px` : 'auto';
+      // Keep the same inset on both axes; only the top-left corner
+      // needs clearance for the camera name.
+      const label = cell.querySelector('.label-overlay');
+      const top = horizontal === 'left' && label && x < label.offsetLeft + label.offsetWidth
+        ? Math.max(y+8, label.offsetTop + label.offsetHeight + 4) : y+8;
+      overlay.style.top = vertical === 'top' ? `${top}px` : 'auto';
       overlay.style.bottom = vertical === 'bottom' ? `${Math.max(8,cell.clientHeight-y-imageHeight+8)}px` : 'auto';
       overlay.style.left = horizontal === 'left' ? `${x+8}px` : horizontal === 'center' ? `${x+imageWidth/2}px` : 'auto';
       overlay.style.right = horizontal === 'right' ? `${Math.max(8,cell.clientWidth-x-imageWidth+8)}px` : 'auto';

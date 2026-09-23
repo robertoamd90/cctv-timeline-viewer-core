@@ -119,3 +119,35 @@ class RecordingEventsTests(unittest.TestCase):
         self.assertEqual(camera.ha_event_entities,'binary_sensor.car=vehicle')
         updated = update_camera(camera.id,CameraUpdate(name='New',source_path=self.tmp.name,timezone='UTC',ha_event_entities=''))
         self.assertEqual(updated.ha_event_entities,'')
+
+    def test_mapping_save_invalidates_day_and_is_visible_on_camera_reload(self):
+        from ctv_server.api.cameras import create_camera, update_camera, list_cameras
+        from ctv_server.models import CameraCreate, CameraUpdate
+        from ctv_server.auth import CurrentUser
+        from starlette.requests import Request
+        camera = create_camera(CameraCreate(name='New',source_path=self.tmp.name,timezone='UTC'))
+        with db.write_db() as conn:
+            conn.execute("INSERT INTO partitions(camera_id,partition_key,path,status,last_scanned) VALUES(?,'2026-01-01',?,'ready',9999999999)",(camera.id,self.tmp.name))
+        mapping='binary_sensor.front=person\nbinary_sensor.car=vehicle'
+        update_camera(camera.id, CameraUpdate(name='New',source_path=self.tmp.name,timezone='UTC',ha_event_entities=mapping))
+        request=Request({'type':'http'})
+        request.state.ctv_user=CurrentUser('test','test','test',True,True)
+        reloaded=next(item for item in list_cameras(request) if item['id']==camera.id)
+        self.assertEqual(reloaded['ha_event_entities'], mapping)
+        conn=db.get_db()
+        try:
+            self.assertIsNone(conn.execute('SELECT last_scanned FROM partitions WHERE camera_id=?',(camera.id,)).fetchone()[0])
+        finally:
+            conn.close()
+
+    def test_enriched_events_and_thumbnail_are_exposed_on_timeline(self):
+        from ctv_server.api.timeline import get_timeline
+        with patch('ctv_server.recording_events.fetch_history',return_value=self.history()):
+            enrich_partition(self.camera,'2026-01-01',index_generation())
+        with db.write_db() as conn:
+            conn.execute("UPDATE recordings SET thumbnail_path='/derived/thumbnail.jpg'")
+        timeline=get_timeline(self.ts,self.ts+300,str(self.camera))
+        segment=timeline['cameras'][0]['segments'][0]
+        self.assertTrue(segment['has_thumbnail'])
+        self.assertEqual(segment['events'],[{'type':'person','timestamp':self.ts+70}])
+        self.assertEqual(segment['events_status'],'found')

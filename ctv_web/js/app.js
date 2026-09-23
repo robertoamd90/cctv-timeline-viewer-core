@@ -788,7 +788,9 @@ async function initializeTimelineDate() {
   document.getElementById('timeline-date').value = S.selectedDate;
 }
 
+let timelineLoadSequence = 0;
 async function loadTimeline(from, to, prepare = true) {
+  const requestId = ++timelineLoadSequence;
   try {
     if (from == null || to == null) {
       const range = selectedDayRange();
@@ -808,7 +810,9 @@ async function loadTimeline(from, to, prepare = true) {
     if (from != null) url += 'from=' + from + '&';
     if (to != null) url += 'to=' + to + '&';
     if (cameraQuery) url += 'cameras=' + cameraQuery;
-    S.timeline = await api(url);
+    const timeline = await api(url);
+    if (requestId !== timelineLoadSequence) return;
+    S.timeline = timeline;
   } catch(e) { toast(t('cameras.errorTimeline'), 'error'); return; }
   if (!S.timeline || !S.timeline.cameras.length) {
     const range = selectedDayRange() || [0, 86400];
@@ -1001,7 +1005,12 @@ document.addEventListener('keydown', e => {
 
 // ═══ SSE ═══
 const evtSource = new EventSource(appUrl('/api/events'));
-evtSource.addEventListener('recording_events', () => loadTimeline(undefined, undefined, false));
+let derivedTimelineRefresh;
+function refreshDerivedTimeline() {
+  clearTimeout(derivedTimelineRefresh);
+  derivedTimelineRefresh = setTimeout(() => loadTimeline(undefined, undefined, false), 150);
+}
+evtSource.addEventListener('recording_events', refreshDerivedTimeline);
 evtSource.addEventListener('scan', e => {
   const d = JSON.parse(e.data);
   const el = document.getElementById('topbar-status');
@@ -1017,7 +1026,9 @@ evtSource.addEventListener('scan', e => {
 evtSource.addEventListener('partition', e => {
   const data = JSON.parse(e.data);
   const status = document.getElementById('topbar-status');
-  if (data.status === 'started') {
+  if (data.status === 'thumbnails_done') {
+    refreshDerivedTimeline();
+  } else if (data.status === 'started') {
     status.textContent = t('timeline.loadingPartition', {partition: data.partition});
     recordPartitionProgress(data);
   } else if (['done', 'missing', 'error'].includes(data.status)) {
@@ -1073,6 +1084,7 @@ document.getElementById('btn-add-cam').onclick = async () => {
   if (!Number.isFinite(timeOffsetMagnitude) || timeOffsetMagnitude < 0 || timeOffsetMagnitude > 3600) {
     toast(t('cameras.invalidTimeOffset'), 'error'); return;
   }
+  let savedCameraId = S.editingCameraId;
   try {
     if (S.editingCameraId) {
       const editingId = S.editingCameraId;
@@ -1093,14 +1105,16 @@ document.getElementById('btn-add-cam').onclick = async () => {
           ha_event_entities: document.getElementById("cam-ha-events").value,
         }
       });
+      savedCameraId = camera.id;
       S.visibleCameraIds.push(camera.id);
       localStorage.setItem('ctv-visible-cameras', JSON.stringify(S.visibleCameraIds));
       if (indexingMode === 'full') await api('/api/scan/' + camera.id, { method: 'POST' });
       toast(t('cameras.added'), 'info');
     }
   } catch(e) { toast(t('cameras.errorGeneric', {message: localizeMessage(e.message)}), 'error'); return; }
-  resetCameraForm();
+  S.indexNeedsReload = true;
   await loadCameras();
+  selectCamera(savedCameraId);
 };
 
 const DETECTED_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -1290,6 +1304,7 @@ window._ctvInit = function() {
 };
 
 window._ctvRefreshLanguage = function() {
+  window.CtvEventPicker?.refreshLabels();
   document.getElementById('camera-form-title').textContent =
     t(S.editingCameraId ? 'cameras.edit' : 'cameras.add');
   document.getElementById('btn-add-cam').textContent =

@@ -110,8 +110,17 @@ def _generate_thumbnails(camera_id: int, key: str, expected_generation: int):
         emit("partition", {"camera_id": camera_id, "partition": key, "status": "thumbnails_done"})
 
 
-def run_partition_scan(
-    camera_id: int, key: str, path: str, expected_generation: Optional[int] = None
+def run_partition_scan(camera_id, key, path, expected_generation=None, incremental=False):
+    from ctv_server.index_queue import partition_slot
+    generation = expected_generation if expected_generation is not None else index_generation()
+    with partition_slot(background=incremental) as admitted:
+        if not admitted:
+            return {"camera_id": camera_id, "partition": key, "status": "busy"}
+        return _run_partition_scan(camera_id, key, path, generation, incremental)
+
+
+def _run_partition_scan(
+    camera_id: int, key: str, path: str, expected_generation: Optional[int] = None, incremental: bool = False
 ) -> dict:
     job_generation = (
         expected_generation if expected_generation is not None else index_generation()
@@ -126,14 +135,23 @@ def run_partition_scan(
     try:
         with write_db() as conn:
             camera = conn.execute(
-                "SELECT timezone, source_path FROM cameras WHERE id = ?", (camera_id,)
+                "SELECT * FROM cameras WHERE id = ?", (camera_id,)
             ).fetchone()
             if not camera:
                 return {"camera_id": camera_id, "partition": key, "status": "removed"}
+            if incremental:
+                today = datetime.fromtimestamp(time.time(), ZoneInfo(camera["timezone"])).date()
+                if (not camera["autoscan_enabled"] or camera["indexing_mode"] != "partitioned"
+                        or key != partition_key(today)
+                        or path != resolve_partition(camera["source_path"], camera["directory_pattern"], today)):
+                    return {"camera_id": camera_id, "partition": key, "status": "busy"}
+                requested = conn.execute("SELECT 1 FROM partitions WHERE status='queued' LIMIT 1").fetchone()
+                if requested:
+                    return {"camera_id": camera_id, "partition": key, "status": "busy"}
             conn.execute(
-                "UPDATE partitions SET status = 'scanning', error = NULL, progress_done = 0, progress_total = 0 "
+                "UPDATE partitions SET status = ?, error = NULL, progress_done = 0, progress_total = 0 "
                 "WHERE camera_id = ? AND partition_key = ?",
-                (camera_id, key),
+                ("background" if incremental else "scanning", camera_id, key),
             )
             conn.execute(
                 "UPDATE cameras SET source_status = 'scanning', source_error = NULL WHERE id = ?",
@@ -150,6 +168,13 @@ def run_partition_scan(
         except PermissionError as exc:
             raise PermissionError(f"Sorgente non leggibile: {camera['source_path']}") from exc
         if not os.path.isdir(path):
+            if incremental:
+                with write_db() as conn:
+                    conn.execute("UPDATE partitions SET status='missing' WHERE camera_id=? AND partition_key=?", (camera_id, key))
+                    conn.execute("UPDATE cameras SET source_status='online', source_error=NULL WHERE id=?", (camera_id,))
+                payload = {"camera_id": camera_id, "partition": key, "status": "missing"}
+                emit("partition", payload)
+                return payload
             return invalidate_partition(camera_id, key, path)
 
         last_progress = {"time": 0.0, "done": -1}
@@ -179,16 +204,19 @@ def run_partition_scan(
             partition_key=key,
             purge_missing=True,
             progress=report_progress,
+            **({"incremental": True} if incremental else {}),
         )
         stage = "finalize scan"
         completed = time.time()
         with write_db() as conn:
+            if incremental:
+                result["total"] = conn.execute("SELECT COUNT(*) FROM recordings WHERE camera_id=? AND partition_key=? AND availability='available'", (camera_id,key)).fetchone()[0]
             conn.execute("""
-                UPDATE partitions SET status = 'ready', error = NULL, last_scanned = ?, file_count = ?,
+                UPDATE partitions SET status = CASE WHEN ? AND status='queued' THEN 'queued' ELSE 'ready' END, error = NULL, last_scanned = CASE WHEN ? THEN last_scanned ELSE ? END, file_count = ?,
                     progress_done = ?, progress_total = ?
                 WHERE camera_id = ? AND partition_key = ?
             """, (
-                completed, result["total"], result["total"], result["total"], camera_id, key,
+                incremental, incremental, completed, result["total"], result["total"], result["total"], camera_id, key,
             ))
             conn.execute(
                 "UPDATE cameras SET source_status = 'online', source_error = NULL, last_scan_completed = ? WHERE id = ?",
@@ -288,7 +316,7 @@ def _prepare_partitions(
             ttl = int(os.environ.get("CTV_ACTIVE_PARTITION_SECONDS", default_ttl))
             stale = not row["last_scanned"] or now - row["last_scanned"] >= ttl
             in_progress = row["status"] in {"queued", "scanning"}
-            if stale and not in_progress and not _lock_for(camera_id, key).locked():
+            if stale and not in_progress and (row["status"] == "background" or not _lock_for(camera_id, key).locked()):
                 conn.execute(
                     "UPDATE partitions SET status = 'queued', error = NULL, "
                     "progress_done = 0, progress_total = 0 "

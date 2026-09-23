@@ -2,6 +2,12 @@
 
 const CTV_TRANSLATIONS = {
   en: {
+    "autoscan.title": "Automatic indexing",
+    "autoscan.enabled": "Index today in the background",
+    "autoscan.interval": "Interval (minutes)",
+    "autoscan.help": "Only today, in this camera’s timezone. Each run lists the day’s filenames; only new or unsettled videos are inspected. Runs even when the app is closed. Save the camera to apply.",
+    "autoscan.partitionedOnly": "Available only with date-partitioned indexing.",
+    "autoscan.invalidInterval": "Enter a whole number of minutes between 1 and 10080.",
     "events.filter": "Events",
     "events.showAll": "Show all videos",
     "events.noMatchingClips": "No matching videos for the displayed cameras",
@@ -224,6 +230,12 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
+    "autoscan.title": "Indicizzazione automatica",
+    "autoscan.enabled": "Indicizza oggi in background",
+    "autoscan.interval": "Intervallo (minuti)",
+    "autoscan.help": "Solo oggi, nel fuso orario della camera. Ogni scansione elenca i nomi dei file del giorno; vengono analizzati solo i video nuovi o non ancora stabili. Funziona anche ad app chiusa. Salva la camera per applicare.",
+    "autoscan.partitionedOnly": "Disponibile solo con indicizzazione per data.",
+    "autoscan.invalidInterval": "Inserisci un numero intero di minuti tra 1 e 10080.",
     "events.filter": "Eventi",
     "events.showAll": "Mostra tutti i video",
     "events.noMatchingClips": "Nessun video corrispondente per le camere visualizzate",

@@ -281,6 +281,10 @@ def init_db():
     _add_columns(conn, "cameras", (
         "time_offset_seconds REAL NOT NULL DEFAULT 0",
         "ha_event_entities TEXT NOT NULL DEFAULT ''",
+        "autoscan_enabled INTEGER NOT NULL DEFAULT 0",
+        "autoscan_interval_minutes INTEGER NOT NULL DEFAULT 60",
+        "autoscan_last_attempt REAL",
+        "autoscan_last_day TEXT",
         "event_overlay_position TEXT NOT NULL DEFAULT 'top-right'",
         "indexing_mode TEXT NOT NULL DEFAULT 'partitioned'",
         "directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}'",
@@ -294,6 +298,7 @@ def init_db():
         "ha_events_status TEXT NOT NULL DEFAULT 'pending'",
         "ha_events_checked REAL",
         "ha_events_signature TEXT",
+        "autoscan_settled INTEGER NOT NULL DEFAULT 0",
         "ha_events_version INTEGER NOT NULL DEFAULT 1",
         "mtime REAL",
         "partition_key TEXT",

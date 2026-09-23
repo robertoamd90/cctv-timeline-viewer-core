@@ -24,7 +24,7 @@ TIMESTAMP_PATTERNS = [
 ]
 
 
-def scan_directory(source_path: str) -> list[dict]:
+def scan_directory(source_path: str, skip_paths: Optional[set[str]] = None) -> list[dict]:
     """Trova solo i file video supportati in una directory (ricorsivo)."""
     if not os.path.isdir(source_path):
         raise FileNotFoundError(f"Sorgente non disponibile: {source_path}")
@@ -34,6 +34,8 @@ def scan_directory(source_path: str) -> list[dict]:
         directory = pending_directories.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                if skip_paths and entry.path in skip_paths:
+                    continue
                 if entry.is_dir(follow_symlinks=False):
                     pending_directories.append(entry.path)
                     continue

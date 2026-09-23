@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=0.1.28-events-fields1">
+<link rel="stylesheet" href="style.css?v=event-playback1">
 </head>
 <body>
 
@@ -60,6 +60,10 @@
       <div id="camera-filter-wrap">
         <button id="btn-camera-filter" data-i18n="controls.cameraFilter" aria-expanded="false">Cameras</button>
         <div id="camera-filter-menu" role="menu"></div>
+      </div>
+      <div id="event-filter-wrap">
+        <button id="btn-event-filter" aria-expanded="false" data-i18n="events.filter">Events</button>
+        <div id="event-filter-menu" hidden></div>
       </div>
       <div id="stream-options-wrap">
         <button id="btn-stream-options" data-i18n="streaming.options" aria-expanded="false">Stream</button>
@@ -177,6 +181,15 @@
           <input type="hidden" id="cam-ha-events">
           <p class="event-picker-help" data-i18n="events.fieldsHelp">One sensor per event. Changes are applied when you save the camera.</p>
           <div id="ha-event-fields"></div>
+          <label for="cam-event-position" data-i18n="events.position">Video badge position</label>
+          <select id="cam-event-position">
+            <option value="top-left" data-i18n="events.top-left">Top left</option>
+            <option value="top-center" data-i18n="events.top-center">Top center</option>
+            <option value="top-right" data-i18n="events.top-right" selected>Top right</option>
+            <option value="bottom-left" data-i18n="events.bottom-left">Bottom left</option>
+            <option value="bottom-center" data-i18n="events.bottom-center">Bottom center</option>
+            <option value="bottom-right" data-i18n="events.bottom-right">Bottom right</option>
+          </select>
           <div id="ha-entities-status" role="status" aria-live="polite"></div>
           <button type="button" id="ha-entities-retry" hidden data-i18n="events.retry">Retry loading entities</button>
         </fieldset>
@@ -276,15 +289,17 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=0.1.28-events-fields1"></script>
+<script src="js/i18n.js?v=event-playback1"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
 <script src="js/media.js?v=0.1.29-remote1"></script>
-<script src="js/app.js?v=0.1.28-events-fields1"></script>
-<script src="js/event-icons.js?v=events-fields1"></script>
-<script src="js/event-picker.js?v=events-fields1"></script>
-<script src="js/timeline.js?v=0.1.28-events-fields1"></script>
-<script src="js/player.js?v=0.1.35-remote1"></script>
+<script src="js/event-playback.js?v=event-playback1"></script>
+<script src="js/app.js?v=event-playback1"></script>
+<script src="js/event-icons.js?v=event-playback1"></script>
+<script src="js/event-picker.js?v=event-playback1"></script>
+<script src="js/event-filter.js?v=event-playback1"></script>
+<script src="js/timeline.js?v=event-playback1"></script>
+<script src="js/player.js?v=event-playback1"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);
 document.getElementById('btn-next-frame').onclick = () => jumpToBoundary(1);

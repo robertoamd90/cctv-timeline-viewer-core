@@ -99,6 +99,7 @@ def list_cameras(request: Request) -> list[dict]:
             "id": row["id"],
             "name": row["name"],
             "timezone": row["timezone"],
+            "event_overlay_position": row["event_overlay_position"],
             "source_status": row["source_status"],
             "recordings_available": row["recordings_available"] or 0,
             "recordings_missing": row["recordings_missing"] or 0,
@@ -119,8 +120,8 @@ def create_camera(body: CameraCreate, _: CurrentUser = Depends(require_admin)) -
     with write_db() as conn:
         cur = conn.execute(
             "INSERT INTO cameras (name, source_path, timezone, time_offset_seconds, indexing_mode, "
-            "directory_pattern, ha_event_entities, source_status) VALUES (?, ?, ?, ?, ?, ?, ?, 'online')",
-            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern, body.ha_event_entities),
+            "directory_pattern, ha_event_entities, event_overlay_position, source_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'online')",
+            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern, body.ha_event_entities, body.event_overlay_position),
         )
         camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (cur.lastrowid,)).fetchone()
     return CameraResponse(**dict(camera))
@@ -150,10 +151,10 @@ def update_camera(
             thumbnails = _delete_camera_index_data(conn, camera_id)
         cur = conn.execute(
             "UPDATE cameras SET name = ?, source_path = ?, timezone = ?, time_offset_seconds = ?, "
-            "indexing_mode = ?, directory_pattern = ?, ha_event_entities = ?, "
+            "indexing_mode = ?, directory_pattern = ?, ha_event_entities = ?, event_overlay_position = ?, "
             "source_status = ?, source_error = ? WHERE id = ?",
             (body.name.strip(), source_path, tz, body.time_offset_seconds,
-             body.indexing_mode, pattern, body.ha_event_entities,
+             body.indexing_mode, pattern, body.ha_event_entities, body.event_overlay_position,
              "unknown" if cache_changed else previous["source_status"],
              None if cache_changed else previous["source_error"], camera_id),
         )

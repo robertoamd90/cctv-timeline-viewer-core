@@ -49,7 +49,16 @@ def extract_events(history, mapping, start, end):
         entity = states[0].get("entity_id")
         if entity not in mapping:
             continue
-        previous = None
+        active = None
+        def finish(end_ts=None):
+            if active is None:
+                return
+            effective_end = end_ts if end_ts is not None else active + 3
+            if active < end and effective_end > start:
+                item = {"type": mapping[entity], "timestamp": active}
+                if end_ts is not None:
+                    item["end_timestamp"] = end_ts
+                events[(entity, active)] = item
         for state in states:
             value = state.get("state")
             stamp = state.get("last_changed") or state.get("last_updated")
@@ -59,11 +68,18 @@ def extract_events(history, mapping, start, end):
             if parsed.tzinfo is None:
                 raise ValueError("HA timestamp lacks timezone")
             ts = parsed.timestamp()
-            # Initial HA state can precede the requested period: never invent
-            # a detection at the start of the day from that carry-in state.
-            if value == "on" and previous != "on" and start <= ts < end:
-                events[(entity, ts)] = {"type": mapping[entity], "timestamp": ts}
-            previous = value
+            if value == "on":
+                if active is None:
+                    active = ts
+            elif value == "off":
+                if active is not None:
+                    finish(ts if ts > active else None)
+                    active = None
+            else:
+                # A disconnected sensor does not prove the event stayed active.
+                finish()
+                active = None
+        finish()
     return sorted(events.values(), key=lambda item: (item["timestamp"], item["type"]))
 
 
@@ -100,7 +116,7 @@ def _enrich(camera_id, key, generation):
     # Preserve historical results on routine rescans; refresh today's clips
     # and retry errors at most once per five minutes.
     targets = [r for r in rows if r["ha_events_signature"] != row_signature(r) or not r["ha_events_checked"] or
-               ((r["ha_events_status"] == "error" or r["ha_events_checked"] < end) and now-r["ha_events_checked"] >= 300)]
+               ((r["ha_events_status"] == "error" or r["ha_events_checked"] < end or r["ha_events_version"] < 2) and now-r["ha_events_checked"] >= 300)]
     if not targets:
         return
     failed = False
@@ -117,15 +133,20 @@ def _enrich(camera_id, key, generation):
     updates = []
     for row in targets:
         a, b = row["start_ts"] + offset, (row["end_ts"] or row["start_ts"]) + offset
-        found = [e for e in events if a <= e["timestamp"] < b]
+        found = [e for e in events if e["timestamp"] < b and e.get("end_timestamp", e["timestamp"] + 3) > a]
         old = json.loads(row["ha_events"]) if row["ha_events_signature"] == row_signature(row) else []
-        merged = {(e["type"], e["timestamp"]): e for e in old + found}
+        merged = {(e["type"], e["timestamp"]): e for e in old}
+        for event in found:
+            previous = merged.get((event["type"], event["timestamp"]))
+            if previous and "end_timestamp" in previous and "end_timestamp" not in event:
+                continue
+            merged[(event["type"], event["timestamp"])] = event
         payload = sorted(merged.values(), key=lambda e: (e["timestamp"], e["type"]))
         status = "error" if failed else ("found" if payload else "unknown")
-        updates.append((json.dumps(payload), status, now, row_signature(row), row["id"], row["path"]))
+        updates.append((json.dumps(payload), status, now, row_signature(row), row["ha_events_version"] if failed else 2, row["id"], row["path"]))
     with write_db() as conn:
         current = conn.execute("SELECT ha_event_entities, time_offset_seconds, timezone FROM cameras WHERE id=?", (camera_id,)).fetchone()
         if generation != index_generation() or not current or any(current[k] != camera[k] for k in current.keys()):
             return
         conn.executemany("UPDATE recordings SET ha_events=?, ha_events_status=?, ha_events_checked=?, "
-                         "ha_events_signature=? WHERE id=? AND path=?", updates)
+                         "ha_events_signature=?, ha_events_version=? WHERE id=? AND path=?", updates)

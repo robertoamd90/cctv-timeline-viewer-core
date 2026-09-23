@@ -234,6 +234,7 @@ function renderPlayers(forceReload = false) {
     }
   });
   applyHotspotCellPositions();
+  updateEventOverlays();
 }
 
 function updatePlayerCell(cell, cam, rec, cid) {
@@ -322,11 +323,13 @@ function updatePlayerCell(cell, cam, rec, cid) {
         if (playbackDiagnostics.firstFrames.length > 64) playbackDiagnostics.firstFrames.shift();
       }
       clearStatusWhenReady(v);
+      updateEventOverlays();
     };
-    v.oncanplay = () => clearStatusWhenReady(v);
+    v.oncanplay = () => { clearStatusWhenReady(v); updateEventOverlays(); };
     v.onseeked = () => {
       v.dataset.driftSeek = '0';
       clearStatusWhenReady(v);
+      updateEventOverlays();
     };
     v.onplaying = () => {
       v.dataset.hasPlayed = '1';
@@ -810,6 +813,10 @@ document.getElementById('btn-play').onclick = () => {
   }
   if (hasCancelledHlsSources()) renderPlayers(true);
   S.playing = true; updatePlayButton();
+  if (typeof selectedEventTypes !== 'undefined' && selectedEventTypes.size) {
+    reconcilePlaybackPosition();
+    if (!S.playing) return;
+  }
   enterBufferingBarrier(null, null);
   startClock();
 };
@@ -879,6 +886,7 @@ function updateTimeDisplay() {
   const display = document.getElementById('time-display');
   const value = S.currentTime ? fmtTime(S.currentTime) : '--';
   if (display.textContent !== value) display.textContent = value;
+  updateEventOverlays();
 }
 function updatePlaybackUi(force = false) {
   const now = performance.now();
@@ -1041,4 +1049,44 @@ function reconcilePlaybackPosition() {
     // boundary. A new recording will enter the shared barrier as usual.
     if (S.playing && requiresWarmup) enterBufferingBarrier(null, null);
   }
+}
+
+
+function updateEventOverlays() {
+  if (!window.CtvEventPlayback) return;
+  document.querySelectorAll('#player-area .player-cell').forEach(cell => {
+    const cid = Number(cell.dataset.cam);
+    const video = cell.querySelector('video');
+    const camera = S.cameras.find(item => item.id === cid);
+    const time = video && !video.hidden && video.readyState >= 2 && video.dataset.warming !== '1'
+      ? absoluteVideoTime(video) : null;
+    const recording = time == null ? null : findRecordingAt(cid, time);
+    const active = recording ? CtvEventPlayback.activeTypes(recording.events, time) : [];
+    let overlay = cell.querySelector('.video-event-badges');
+    if (!overlay && !active.length) return;
+    if (!overlay) { overlay = document.createElement('div'); overlay.className = 'video-event-badges'; cell.appendChild(overlay); }
+    overlay.dataset.position = camera?.event_overlay_position || 'top-right';
+    // Anchor to the displayed image, not to the surrounding letterbox bars.
+    const width = video?.clientWidth || cell.clientWidth;
+    const height = video?.clientHeight || cell.clientHeight;
+    const geometry = [width,height,video?.videoWidth,video?.videoHeight,cell.clientWidth,cell.clientHeight,overlay.dataset.position].join(':');
+    if (overlay.dataset.geometry !== geometry && video?.videoWidth && video?.videoHeight) {
+      overlay.dataset.geometry = geometry;
+      const scale = Math.min(width/video.videoWidth, height/video.videoHeight);
+      const imageWidth = video.videoWidth*scale, imageHeight = video.videoHeight*scale;
+      const x = video.offsetLeft+(width-imageWidth)/2, y = video.offsetTop+(height-imageHeight)/2;
+      const [vertical,horizontal] = overlay.dataset.position.split('-');
+      overlay.style.top = vertical === 'top' ? `${Math.max(30,y+8)}px` : 'auto';
+      overlay.style.bottom = vertical === 'bottom' ? `${Math.max(8,cell.clientHeight-y-imageHeight+8)}px` : 'auto';
+      overlay.style.left = horizontal === 'left' ? `${x+8}px` : horizontal === 'center' ? `${x+imageWidth/2}px` : 'auto';
+      overlay.style.right = horizontal === 'right' ? `${Math.max(8,cell.clientWidth-x-imageWidth+8)}px` : 'auto';
+      overlay.style.maxWidth = `${Math.max(24,imageWidth-16)}px`;
+    }
+    const key = active.map(kind => t('events.'+kind)).join('|');
+    if (overlay.dataset.active !== key) {
+      overlay.dataset.active = key;
+      overlay.innerHTML = active.map(kind => `<span class="video-event-badge" title="${escAttr(t('events.'+kind))}">${CtvEventIcons.svg(kind)}<span>${esc(t('events.'+kind))}</span></span>`).join('');
+    }
+    overlay.hidden = !active.length;
+  });
 }

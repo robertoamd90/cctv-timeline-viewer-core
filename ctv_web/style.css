@@ -632,3 +632,5 @@ label[for=cam-event-position] { display:block; margin-top:16px; }
 
 .autoscan-toggle { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
 .autoscan-toggle input { width:auto; margin:0; flex-shrink:0; }
+
+#autoscan-settings { padding:16px; border-top:1px solid var(--border); }

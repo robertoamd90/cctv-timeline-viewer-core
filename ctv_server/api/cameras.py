@@ -120,8 +120,8 @@ def create_camera(body: CameraCreate, _: CurrentUser = Depends(require_admin)) -
     with write_db() as conn:
         cur = conn.execute(
             "INSERT INTO cameras (name, source_path, timezone, time_offset_seconds, indexing_mode, "
-            "directory_pattern, ha_event_entities, event_overlay_position, autoscan_enabled, autoscan_interval_minutes, source_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online')",
-            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern, body.ha_event_entities, body.event_overlay_position, body.autoscan_enabled, body.autoscan_interval_minutes),
+            "directory_pattern, ha_event_entities, event_overlay_position, source_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'online')",
+            (body.name.strip(), source_path, tz, body.time_offset_seconds, body.indexing_mode, pattern, body.ha_event_entities, body.event_overlay_position),
         )
         camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (cur.lastrowid,)).fetchone()
     return CameraResponse(**dict(camera))
@@ -152,10 +152,9 @@ def update_camera(
         cur = conn.execute(
             "UPDATE cameras SET name = ?, source_path = ?, timezone = ?, time_offset_seconds = ?, "
             "indexing_mode = ?, directory_pattern = ?, ha_event_entities = ?, event_overlay_position = ?, "
-            "autoscan_enabled = ?, autoscan_interval_minutes = ?, source_status = ?, source_error = ? WHERE id = ?",
+            "source_status = ?, source_error = ? WHERE id = ?",
             (body.name.strip(), source_path, tz, body.time_offset_seconds,
              body.indexing_mode, pattern, body.ha_event_entities, body.event_overlay_position,
-             body.autoscan_enabled, body.autoscan_interval_minutes,
              "unknown" if cache_changed else previous["source_status"],
              None if cache_changed else previous["source_error"], camera_id),
         )
@@ -165,7 +164,7 @@ def update_camera(
                 previous["time_offset_seconds"] != body.time_offset_seconds):
             # A new association must enrich even a recently indexed day.
             conn.execute("UPDATE partitions SET last_scanned = NULL WHERE camera_id = ?", (camera_id,))
-        if cache_changed or previous["autoscan_enabled"] != body.autoscan_enabled:
+        if cache_changed:
             conn.execute("UPDATE cameras SET autoscan_last_attempt=NULL, autoscan_last_day=NULL WHERE id=?", (camera_id,))
         camera = conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone()
     for thumbnail in thumbnails:

@@ -12,8 +12,9 @@ from ctv_server.autoscan import run_due_autoscans, recover_interrupted_scans
 from ctv_server.indexer import index_camera
 from ctv_server.index_queue import partition_slot
 from ctv_server.scanner import scan_directory
-from ctv_server.models import CameraCreate, CameraUpdate
+from ctv_server.models import CameraCreate, CameraUpdate, AutoscanSettings
 from ctv_server.api.cameras import create_camera, update_camera
+from ctv_server.api.system import get_autoscan_settings, update_autoscan_settings
 
 
 class AutoscanTests(unittest.TestCase):
@@ -36,7 +37,9 @@ class AutoscanTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def enable(self, **values):
-        self.camera = update_camera(self.camera.id, CameraUpdate(name='Test', source_path=str(self.root), timezone='UTC', autoscan_enabled=True, **values))
+        interval = values.pop('autoscan_interval_minutes', 60)
+        self.camera = update_camera(self.camera.id, CameraUpdate(name='Test', source_path=str(self.root), timezone='UTC', **values))
+        update_autoscan_settings(AutoscanSettings(enabled=True, interval_minutes=interval))
 
     def tick(self, now=None):
         with patch('ctv_server.autoscan.time.time', return_value=self.now if now is None else now):
@@ -59,15 +62,43 @@ class AutoscanTests(unittest.TestCase):
 
     def test_default_off_validation_and_saved_settings(self):
         self.tick()
-        self.assertFalse(self.camera.autoscan_enabled)
-        self.assertEqual(self.camera.autoscan_interval_minutes,60)
+        self.assertFalse(get_autoscan_settings()['enabled'])
+        self.assertEqual(get_autoscan_settings()['interval_minutes'],60)
         self.assertEqual(self.probe.call_count,0)
         self.enable(autoscan_interval_minutes=10)
-        self.assertTrue(self.camera.autoscan_enabled)
-        self.assertEqual(self.camera.autoscan_interval_minutes,10)
+        self.assertTrue(get_autoscan_settings()['enabled'])
+        self.assertEqual(get_autoscan_settings()['interval_minutes'],10)
         for invalid in [0,-1,10081,1.5]:
             with self.assertRaises(ValueError):
-                CameraCreate(name='x',source_path='/x',autoscan_interval_minutes=invalid)
+                AutoscanSettings(interval_minutes=invalid)
+
+    def test_one_global_setting_controls_all_partitioned_cameras(self):
+        second = create_camera(CameraCreate(name='Second', source_path=str(self.root), timezone='UTC'))
+        create_camera(CameraCreate(name='Recursive', source_path=str(self.root), timezone='UTC', indexing_mode='full'))
+        update_autoscan_settings(AutoscanSettings(enabled=True, interval_minutes=10))
+        with patch('ctv_server.autoscan.run_partition_scan', return_value={'status': 'done'}) as scan:
+            self.tick()
+            self.assertEqual([call.args[0] for call in scan.call_args_list], [self.camera.id, second.id])
+            self.tick(self.now+599)
+            self.assertEqual(scan.call_count, 2)
+            self.tick(self.now+600)
+            self.assertEqual(scan.call_count, 4)
+            update_autoscan_settings(AutoscanSettings(enabled=False, interval_minutes=10))
+            self.tick(self.now+1200)
+            self.assertEqual(scan.call_count, 4)
+        self.assertNotIn('autoscan_enabled', self.camera.model_dump())
+        db.init_db()
+        self.assertEqual(get_autoscan_settings(), {'enabled': 0, 'interval_minutes': 10})
+
+    def test_old_per_camera_configuration_does_not_enable_global_scanning(self):
+        self.media(); self.light()
+        with db.write_db() as conn:
+            conn.execute('DROP TABLE autoscan_settings')
+            conn.execute('ALTER TABLE cameras ADD COLUMN autoscan_enabled INTEGER DEFAULT 1')
+            conn.execute('ALTER TABLE cameras ADD COLUMN autoscan_interval_minutes INTEGER DEFAULT 10')
+        db.init_db()
+        self.assertEqual(get_autoscan_settings(), {'enabled': 0, 'interval_minutes': 60})
+        self.assertEqual(len(self.rows()), 1)
 
     def test_only_today_and_persistent_interval(self):
         self.media()
@@ -202,7 +233,7 @@ class AutoscanTests(unittest.TestCase):
         with patch('ctv_server.autoscan.run_partition_scan') as scan:
             run_due_autoscans(stop)
             scan.assert_not_called()
-        update_camera(self.camera.id, CameraUpdate(name='Test',source_path=str(self.root),timezone='UTC',autoscan_enabled=False))
+        update_autoscan_settings(AutoscanSettings(enabled=False))
         with patch('ctv_server.autoscan.run_partition_scan') as scan:
             self.tick()
             scan.assert_not_called()

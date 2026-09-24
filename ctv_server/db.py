@@ -251,6 +251,13 @@ def init_db():
             hls_temp_mb INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS autoscan_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL DEFAULT 0,
+            interval_minutes INTEGER NOT NULL DEFAULT 60
+        );
+        INSERT OR IGNORE INTO autoscan_settings(id) VALUES (1);
+
         CREATE TABLE IF NOT EXISTS schema_state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -281,8 +288,6 @@ def init_db():
     _add_columns(conn, "cameras", (
         "time_offset_seconds REAL NOT NULL DEFAULT 0",
         "ha_event_entities TEXT NOT NULL DEFAULT ''",
-        "autoscan_enabled INTEGER NOT NULL DEFAULT 0",
-        "autoscan_interval_minutes INTEGER NOT NULL DEFAULT 60",
         "autoscan_last_attempt REAL",
         "autoscan_last_day TEXT",
         "event_overlay_position TEXT NOT NULL DEFAULT 'top-right'",

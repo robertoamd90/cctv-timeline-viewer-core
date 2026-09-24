@@ -141,7 +141,8 @@ def _run_partition_scan(
                 return {"camera_id": camera_id, "partition": key, "status": "removed"}
             if incremental:
                 today = datetime.fromtimestamp(time.time(), ZoneInfo(camera["timezone"])).date()
-                if (not camera["autoscan_enabled"] or camera["indexing_mode"] != "partitioned"
+                enabled = conn.execute("SELECT enabled FROM autoscan_settings WHERE id=1").fetchone()[0]
+                if (not enabled or camera["indexing_mode"] != "partitioned"
                         or key != partition_key(today)
                         or path != resolve_partition(camera["source_path"], camera["directory_pattern"], today)):
                     return {"camera_id": camera_id, "partition": key, "status": "busy"}

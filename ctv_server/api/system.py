@@ -15,6 +15,7 @@ from ctv_server.db import (
 )
 from ctv_server.models import StreamProfilesUpdate
 from ctv_server.models import PlaybackSettings
+from ctv_server.models import AutoscanSettings
 from ctv_server import playback
 from ctv_server.operations import IndexBusyError, maintenance_window
 from ctv_server.streaming import get_stream_profiles, invalidate_stream_profiles
@@ -22,6 +23,27 @@ from ctv_server.thumbnailer import THUMBNAIL_DIR
 
 router = APIRouter(prefix="/api", tags=["system"])
 log = logging.getLogger("ctv.system")
+
+
+@router.get("/admin/autoscan-settings", response_model=AutoscanSettings)
+def get_autoscan_settings(_: CurrentUser = Depends(require_admin)):
+    from ctv_server.db import get_db
+    conn = get_db()
+    try:
+        return dict(conn.execute("SELECT enabled, interval_minutes FROM autoscan_settings WHERE id=1").fetchone())
+    finally:
+        conn.close()
+
+
+@router.put("/admin/autoscan-settings", response_model=AutoscanSettings)
+def update_autoscan_settings(settings: AutoscanSettings, _: CurrentUser = Depends(require_admin)):
+    with write_db() as conn:
+        previous = conn.execute("SELECT enabled FROM autoscan_settings WHERE id=1").fetchone()[0]
+        conn.execute("UPDATE autoscan_settings SET enabled=?, interval_minutes=? WHERE id=1",
+                     (settings.enabled, settings.interval_minutes))
+        if settings.enabled and not previous:
+            conn.execute("UPDATE cameras SET autoscan_last_attempt=NULL, autoscan_last_day=NULL")
+    return settings
 
 
 @router.get("/playback-status")

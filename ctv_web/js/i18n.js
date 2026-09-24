@@ -2,11 +2,12 @@
 
 const CTV_TRANSLATIONS = {
   en: {
-    "autoscan.title": "Automatic indexing",
+    "autoscan.title": "Automatic indexing — all cameras",
+    "autoscan.save": "Save automatic indexing",
+    "autoscan.saved": "Automatic indexing saved",
     "autoscan.enabled": "Index today in the background",
     "autoscan.interval": "Interval (minutes)",
-    "autoscan.help": "Only today, in this camera’s timezone. Each run lists the day’s filenames; only new or unsettled videos are inspected. Runs even when the app is closed. Save the camera to apply.",
-    "autoscan.partitionedOnly": "Available only with date-partitioned indexing.",
+    "autoscan.help": "One setting for all date-partitioned cameras. Only today, in each camera’s timezone, one camera at a time. Each run still lists the day’s filenames. Runs with the app closed.",
     "autoscan.invalidInterval": "Enter a whole number of minutes between 1 and 10080.",
     "events.filter": "Events",
     "events.showAll": "Show all videos",
@@ -230,11 +231,12 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
-    "autoscan.title": "Indicizzazione automatica",
+    "autoscan.title": "Indicizzazione automatica — tutte le camere",
+    "autoscan.save": "Salva indicizzazione automatica",
+    "autoscan.saved": "Indicizzazione automatica salvata",
     "autoscan.enabled": "Indicizza oggi in background",
     "autoscan.interval": "Intervallo (minuti)",
-    "autoscan.help": "Solo oggi, nel fuso orario della camera. Ogni scansione elenca i nomi dei file del giorno; vengono analizzati solo i video nuovi o non ancora stabili. Funziona anche ad app chiusa. Salva la camera per applicare.",
-    "autoscan.partitionedOnly": "Disponibile solo con indicizzazione per data.",
+    "autoscan.help": "Un’unica impostazione per tutte le camere con indicizzazione per data. Solo oggi, nel fuso di ciascuna camera, una camera alla volta. Ogni scansione elenca comunque i nomi dei file del giorno. Funziona ad app chiusa.",
     "autoscan.invalidInterval": "Inserisci un numero intero di minuti tra 1 e 10080.",
     "events.filter": "Eventi",
     "events.showAll": "Mostra tutti i video",

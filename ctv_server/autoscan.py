@@ -1,4 +1,4 @@
-"""Persistent per-camera schedules. Only today's physical directory is inspected."""
+"""One global policy for all cameras; only today's directory is inspected."""
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -20,7 +20,7 @@ def run_due_autoscans(stop=None):
     conn = get_db()
     try:
         ids = [row[0] for row in conn.execute(
-            "SELECT id FROM cameras WHERE autoscan_enabled=1 AND indexing_mode='partitioned' ORDER BY autoscan_last_attempt, id"
+            "SELECT id FROM cameras WHERE indexing_mode='partitioned' ORDER BY autoscan_last_attempt, id"
         )]
     finally:
         conn.close()
@@ -30,13 +30,16 @@ def run_due_autoscans(stop=None):
         now = time.time()
         generation = index_generation()
         with write_db() as conn:
+            settings = conn.execute("SELECT * FROM autoscan_settings WHERE id=1").fetchone()
+            if not settings['enabled']:
+                return
             camera = conn.execute("SELECT * FROM cameras WHERE id=?", (camera_id,)).fetchone()
-            if not camera or not camera['autoscan_enabled'] or camera['indexing_mode'] != 'partitioned':
+            if not camera or camera['indexing_mode'] != 'partitioned':
                 continue
             day = datetime.fromtimestamp(now, ZoneInfo(camera['timezone'])).date()
             key = partition_key(day)
             last = camera['autoscan_last_attempt']
-            if camera['autoscan_last_day'] == key and last is not None and now-last < camera['autoscan_interval_minutes']*60:
+            if camera['autoscan_last_day'] == key and last is not None and now-last < settings['interval_minutes']*60:
                 continue
             path = resolve_partition(camera['source_path'], camera['directory_pattern'], day)
             row = conn.execute("SELECT status FROM partitions WHERE camera_id=? AND partition_key=?", (camera_id,key)).fetchone()

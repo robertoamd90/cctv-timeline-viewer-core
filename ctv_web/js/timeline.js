@@ -137,6 +137,14 @@ function renderOverview(vFrom, vTo, width) {
   updateOverviewPlayhead();
 }
 
+const timelineEventOrder = ['person', 'vehicle', 'animal', 'motion', 'doorbell'];
+function recordingEventButtons(events) {
+  return timelineEventOrder.filter(kind => events.some(event => event.type === kind)).map(kind => {
+    const timestamp = Math.min(...events.filter(event => event.type === kind).map(event => event.timestamp));
+    return `<button type="button" data-event-ts="${timestamp}" aria-label="${escAttr(t('events.' + kind) + ' · ' + t('events.seek'))}" title="${escAttr(t('events.' + kind) + ' · ' + t('events.seek'))}">${window.CtvEventIcons.svg(kind)}</button>`;
+  }).join('');
+}
+
 function renderRows(vFrom, vTo, segW, rW) {
   const body = document.getElementById('timeline-body');
   let html = '';
@@ -148,6 +156,12 @@ function renderRows(vFrom, vTo, segW, rW) {
         const w = s.end_ts ? timeToX(s.end_ts, vFrom, vTo, segW) - left : 3;
         const spx = Math.max(w, 3);
         const dur = s.duration || 0;
+        const events = s.events || [];
+        const eventCount = timelineEventOrder.filter(kind => events.some(event => event.type === kind)).length;
+        const eventSize = window.matchMedia('(pointer: coarse)').matches ? 32 : 24;
+        const visibleWidth = Math.min(left + spx, segW) - Math.max(left, 0);
+        const showEvents = eventCount > 0 && visibleWidth >= eventCount * eventSize + (eventCount - 1) * 4 + 12;
+        const eventInset = Math.max(0, -left) + 5;
         let thumbHtml = '';
         if (s.has_thumbnail && spx > 50) {
           thumbHtml = `<img class="seg-thumb" loading="lazy" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.id}/thumbnail`))}">`;
@@ -157,7 +171,7 @@ function renderRows(vFrom, vTo, segW, rW) {
           data-camera="${escAttr(cam.camera_name)}" data-filename="${escAttr(s.filename)}"
           data-thumb="${s.has_thumbnail?'1':'0'}" data-events="${escAttr(JSON.stringify(s.events || []))}" data-events-status="${escAttr(s.events_status || 'disabled')}">
           ${thumbHtml}
-          <span class="recording-events">${[...new Set((s.events || []).map(e => e.type))].map(kind => `<button type="button" data-event-ts="${s.events.find(e => e.type === kind).timestamp}" aria-label="${escAttr(t('events.' + kind))}" title="${escAttr(t('events.' + kind) + ' · ' + t('events.seek'))}">${window.CtvEventIcons.svg(kind)}</button>`).join(' ')}</span>
+          ${showEvents ? `<span class="recording-events" style="left:${eventInset}px">${recordingEventButtons(events)}</span>` : events.length ? '<span class="recording-event-indicator" aria-hidden="true"></span>' : ''}
           <div class="seg-info">${esc(s.filename)}${dur>0?' &middot; '+dur.toFixed(0)+'s':''}</div>
         </div>`;
       }).join('');
@@ -231,19 +245,28 @@ function showSegTooltip(e, segment = e.currentTarget) {
     document.body.appendChild(_ttEl);
   }
   const s = segment;
+  const events = JSON.parse(s.dataset.events || '[]');
   let h = `<button type="button" class="tt-close" aria-label="${escAttr(t('controls.closePanel'))}">×</button>`;
   if (s.dataset.thumb === '1') h += `<img class="tt-thumb" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.dataset.recordingId}/thumbnail`))}">`;
-  h += `<div style="padding:8px 12px">`;
+  if (events.length) h += `<div class="tt-events">${recordingEventButtons(events)}</div>`;
+  h += `<div class="tt-details">`;
   h += `<div class="tt-name">${esc(s.dataset.camera)} &middot; ${esc(s.dataset.filename)}</div>`;
   const st = parseFloat(s.dataset.start), en = s.dataset.end ? parseFloat(s.dataset.end) : null;
   h += `<div class="tt-meta">${fmtTime(st)}${en ? ' → '+fmtTimeShort(en) : ''}</div>`;
-  const events = JSON.parse(s.dataset.events || '[]');
   if (s.dataset.eventsStatus !== 'disabled') {
     h += `<div>${esc(t('events.' + s.dataset.eventsStatus))}</div>`;
     h += events.map(event => `<div>${esc(t('events.' + event.type))} · ${fmtTime(event.timestamp)}</div>`).join('');
   }
   h += `</div>`;
   _ttEl.innerHTML = h; _ttEl.style.display = 'block'; moveSegTooltip(e);
+  _ttEl.querySelectorAll('[data-event-ts]').forEach(button => {
+    button.onclick = event => {
+      event.stopPropagation();
+      const target = Math.max(Number(s.dataset.start), Number(button.dataset.eventTs) - 10);
+      hideTooltip();
+      seekTo(target);
+    };
+  });
   _ttEl.querySelector('.tt-close').onclick = event => { event.stopPropagation(); hideTooltip(); };
   const image = _ttEl.querySelector('img');
   if (image) image.addEventListener('load', () => {

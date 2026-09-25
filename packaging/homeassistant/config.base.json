@@ -19,7 +19,7 @@
   "ingress_stream": true,
   "panel_title": "CCTV Viewer",
   "panel_icon": "mdi:cctv",
-  "panel_admin": true,
+  "panel_admin": false,
   "homeassistant_api": true,
   "map": [
     {
@@ -29,7 +29,7 @@
   ],
   "environment": {
     "CTV_DEPLOYMENT": "homeassistant",
-    "CTV_HA_ADMIN_ONLY": "1",
+    "CTV_HA_ADMIN_ONLY": "0",
     "CTV_DB": "/data/ctv.db",
     "CTV_THUMBNAILS": "/data/thumbnails",
     "CTV_SOURCE_ROOTS": "/media",

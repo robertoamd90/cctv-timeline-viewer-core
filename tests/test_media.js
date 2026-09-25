@@ -84,6 +84,15 @@ assert.equal(playbackCompleted({
 }), false, 'a warm-up playback must not advance the timeline');
 
 assert.equal(requiredPlaybackBuffer(16, 10, 30), 4);
+for (const flags of [{}, {buffering:true}, {warming:true}]) {
+  assert.equal(playbackCompleted({ended:true, currentTime:4, actualDuration:4,
+    expectedDuration:6, metadataReady:true, hasPlayed:true, ...flags}), true,
+    'finite exhausted media must advance even with a longer indexed duration');
+}
+assert.equal(playbackCompleted({ended:true, currentTime:0, actualDuration:4,
+  expectedDuration:6, metadataReady:true, hasPlayed:false}), false);
+assert.equal(playbackCompleted({ended:true, currentTime:2, actualDuration:4,
+  expectedDuration:6, metadataReady:true, hasPlayed:true}), false);
 assert.equal(requiredPlaybackBuffer(16, 26, 30), 3.5);
 assert.equal(requiredPlaybackBuffer(16, 29.7, 30), 0);
 assert.equal(requiredPlaybackBuffer(1, 10, NaN), 0.75);
@@ -154,7 +163,6 @@ assert(playerSource.includes('/hls/${jobId}/index.m3u8'));
 assert.match(playerSource, /requiredPlaybackBuffer\(\s*videoPlaybackRate\(video\)/);
 assert.match(playerSource, /transcodedTailHasFrame/);
 assert.match(playerSource, /CtvMedia\.recordingAt/);
-assert.match(playerSource, /const completed = _wasBuffering \? null/);
 assert.match(
   playerSource,
   /streamTransport === 'mp4' && v\.ended[\s\S]*?onVideoEnded\(v, recId\)/,

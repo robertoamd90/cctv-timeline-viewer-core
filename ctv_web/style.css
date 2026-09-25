@@ -212,7 +212,7 @@ body {
 .empty-timeline a { color: var(--accent); cursor: pointer; }
 
 .seg-tooltip {
-  display: none; position: fixed; z-index: 200; pointer-events: none;
+  display: none; position: fixed; z-index: 200; pointer-events: auto;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
   padding: 0; font-size: 11px; line-height: 1.5;
   box-shadow: 0 8px 24px rgba(0,0,0,0.6); max-width: min(320px, calc(100vw - 16px));
@@ -221,6 +221,12 @@ body {
 .seg-tooltip .tt-thumb { width: 100%; display: block; max-height: 160px; object-fit: cover; }
 .seg-tooltip .tt-name { font-weight: 600; color: #fff; }
 .seg-tooltip .tt-meta { color: var(--text-dim); font-size: 10px; margin-top: 2px; }
+.seg-tooltip .tt-close { position:absolute; top:4px; right:4px; width:36px; height:36px; padding:0; background:var(--surface); color:var(--text); z-index:1; }
+.seg-tooltip .tt-name { padding-right:30px; }
+button, [role="button"], .tab {
+  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+  touch-action:manipulation;
+}
 
 #playhead, #playhead-ruler {
   position: absolute; top: 0; width: 2px; background: var(--playhead);

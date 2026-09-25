@@ -128,11 +128,15 @@
   }
 
   function playbackCompleted({
-    ended, currentTime, expectedDuration, metadataReady, hasPlayed,
+    ended, currentTime, expectedDuration, actualDuration, metadataReady, hasPlayed,
     buffering = false, warming = false,
   }) {
-    if (buffering || warming) return false;
     if (!ended || !metadataReady || !hasPlayed) return false;
+    // The index can outlive a growing/replaced file or overestimate its duration.
+    // A confirmed end at the browser's finite media boundary cannot buffer more.
+    if (Number.isFinite(actualDuration) && actualDuration > 0 &&
+        currentTime >= actualDuration - 0.05) return true;
+    if (buffering || warming) return false;
     if (!Number.isFinite(expectedDuration) || expectedDuration <= 0) return true;
     return currentTime >= expectedDuration - 0.5;
   }

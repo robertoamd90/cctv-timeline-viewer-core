@@ -294,6 +294,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.loop = false;
     v.onended = () => {
       if (v.dataset.metadataReady !== '1' || v.dataset.hasPlayed !== '1') return;
+      if (videoReachedEnd(v)) {
+        onVideoEnded(v, recId);
+        return;
+      }
       if (_wasBuffering || v.dataset.warming === '1') {
         if (cell.dataset.streamTransport === 'mp4' && v.ended) {
           onVideoEnded(v, recId);
@@ -301,10 +305,6 @@ function updatePlayerCell(cell, cam, rec, cid) {
         }
         v.pause();
         seekVideo(v);
-        return;
-      }
-      if (videoReachedEnd(v)) {
-        onVideoEnded(v, recId);
         return;
       }
       enterBufferingBarrier(v, t('player.buffering'));
@@ -601,6 +601,17 @@ function onVideoEnded(videoEl, expectedRecId = videoEl.dataset.recording) {
   if (!cam) return;
   const ended = cam.segments.find(s => String(s.id) === curRecId);
   if (!ended) return;
+  // A duration-less record would otherwise remain active forever after ended.
+  if (!Number.isFinite(ended.end_ts) || ended.end_ts <= ended.start_ts) {
+    const measuredEnd = absoluteVideoTime(videoEl);
+    if (!Number.isFinite(measuredEnd) || measuredEnd <= ended.start_ts) return;
+    for (const timeline of new Set([S.timeline, S.unfilteredTimeline])) {
+      const camera = timeline?.cameras.find(c => c.camera_id === camId);
+      if (camera) camera.segments = camera.segments.map(segment =>
+        String(segment.id) === curRecId ? {...segment, end_ts: measuredEnd} : segment);
+    }
+    ended.end_ts = measuredEnd;
+  }
   cell.dataset.transitioning = curRecId;
   videoEl.onended = videoEl.onwaiting = videoEl.onstalled = null;
   const boundary = ended.end_ts ?? (ended.start_ts + (ended.duration || 0));
@@ -632,8 +643,15 @@ function bufferedAheadAt(video, current) {
   return 0;
 }
 
+function videoBufferDuration(video) {
+  const expected = parseFloat(video.parentElement.dataset.duration);
+  const actual = video.duration;
+  if (!Number.isFinite(actual) || actual <= 0) return expected;
+  return Number.isFinite(expected) && expected > 0 ? Math.min(expected, actual) : actual;
+}
+
 function requiredBuffer(video, currentTime = video.currentTime) {
-  const expectedDuration = parseFloat(video.parentElement.dataset.duration);
+  const expectedDuration = videoBufferDuration(video);
   // A transcoded stream already encodes the requested timeline speed. Buffer
   // demand depends on how quickly the browser consumes that stream, not on the
   // amount of source time represented by each encoded second.
@@ -647,6 +665,7 @@ function videoReachedEnd(video) {
   return CtvMedia.playbackCompleted({
     ended: video.ended,
     currentTime: video.currentTime,
+    actualDuration: video.duration,
     expectedDuration,
     metadataReady: video.dataset.metadataReady === '1',
     hasPlayed: video.dataset.hasPlayed === '1',
@@ -658,7 +677,7 @@ function videoReachedEnd(video) {
 function videoHasPlaybackBuffer(video) {
   // Let the decoder consume the tail so the native `ended` event can fire.
   if (videoReachedEnd(video)) return true;
-  const expectedDuration = parseFloat(video.parentElement.dataset.duration);
+  const expectedDuration = videoBufferDuration(video);
   const start = parseFloat(video.parentElement.dataset.start);
   const warmingTarget = video.dataset.warming === '1' && S.currentTime != null && Number.isFinite(start)
     ? videoTargetTime(video)
@@ -912,7 +931,7 @@ function clockTick() {
     failPlayback(); return;
   }
   const videos = activeVideos();
-  const completed = _wasBuffering ? null : videos.find(videoReachedEnd);
+  const completed = videos.find(videoReachedEnd);
   if (completed) {
     onVideoEnded(completed, completed.dataset.recording);
     _tickId = requestAnimationFrame(clockTick);

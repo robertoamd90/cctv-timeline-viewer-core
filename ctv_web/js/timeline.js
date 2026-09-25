@@ -189,13 +189,19 @@ function renderRows(vFrom, vTo, segW, rW) {
 let _ttEl;
 let _ttHideTimer;
 let _ttPoint = null;
-function hideTooltip() { if (_ttEl) { _ttEl.style.display = 'none'; _ttEl.innerHTML = ''; } }
+function hideTooltip() { clearTimeout(_ttHideTimer); if (_ttEl) { _ttEl.style.display = 'none'; _ttEl.innerHTML = ''; } }
 // Nascondi tooltip su scroll e quando il mouse esce dall'area timeline
 (function() {
   const s = document.getElementById('timeline-scroll');
   const body = document.getElementById('timeline-body');
   s.addEventListener('scroll', hideTooltip);
-  s.addEventListener('mouseleave', hideTooltip);
+  s.addEventListener('mouseleave', event => {
+    if (!_ttEl?.contains(event.relatedTarget)) _ttHideTimer = setTimeout(hideTooltip, 150);
+  });
+  document.addEventListener('pointerdown', event => {
+    if (!_ttEl?.contains(event.target)) hideTooltip();
+  });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTooltip(); });
   // Anche wheel sullo scroll container chiude il tooltip
   s.addEventListener('wheel', () => setTimeout(hideTooltip, 50));
   body.addEventListener('mouseover', event => {
@@ -207,7 +213,9 @@ function hideTooltip() { if (_ttEl) { _ttEl.style.display = 'none'; _ttEl.innerH
   body.addEventListener('mouseout', event => {
     const segment = event.target.closest('.timeline-seg');
     const related = event.relatedTarget;
-    if (segment && !(related instanceof Node && segment.contains(related))) hideTooltip();
+    if (segment && !(related instanceof Node && segment.contains(related))) {
+      _ttHideTimer = setTimeout(hideTooltip, 150);
+    }
   });
   body.addEventListener('mousemove', event => {
     if (event.target.closest('.timeline-seg')) moveSegTooltip(event);
@@ -216,9 +224,14 @@ function hideTooltip() { if (_ttEl) { _ttEl.style.display = 'none'; _ttEl.innerH
 
 function showSegTooltip(e, segment = e.currentTarget) {
   clearTimeout(_ttHideTimer);
-  if (!_ttEl) { _ttEl = document.createElement('div'); _ttEl.className = 'seg-tooltip'; document.body.appendChild(_ttEl); }
+  if (!_ttEl) {
+    _ttEl = document.createElement('div'); _ttEl.className = 'seg-tooltip';
+    _ttEl.onmouseenter = () => clearTimeout(_ttHideTimer);
+    _ttEl.onmouseleave = hideTooltip;
+    document.body.appendChild(_ttEl);
+  }
   const s = segment;
-  let h = '';
+  let h = `<button type="button" class="tt-close" aria-label="${escAttr(t('controls.closePanel'))}">×</button>`;
   if (s.dataset.thumb === '1') h += `<img class="tt-thumb" decoding="async" src="${escAttr(appUrl(`/api/recordings/${s.dataset.recordingId}/thumbnail`))}">`;
   h += `<div style="padding:8px 12px">`;
   h += `<div class="tt-name">${esc(s.dataset.camera)} &middot; ${esc(s.dataset.filename)}</div>`;
@@ -231,6 +244,7 @@ function showSegTooltip(e, segment = e.currentTarget) {
   }
   h += `</div>`;
   _ttEl.innerHTML = h; _ttEl.style.display = 'block'; moveSegTooltip(e);
+  _ttEl.querySelector('.tt-close').onclick = event => { event.stopPropagation(); hideTooltip(); };
   const image = _ttEl.querySelector('img');
   if (image) image.addEventListener('load', () => {
     if (_ttPoint && _ttEl.style.display !== 'none') positionSegTooltip(_ttPoint.x, _ttPoint.y);

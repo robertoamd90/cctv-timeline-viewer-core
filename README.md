@@ -38,8 +38,8 @@ it can be installed alongside the stable app without changing it.
 
 The add-on mounts Home Assistant Media read-only. Configure SMB/NFS storage in
 Home Assistant first; CCTV Viewer does not mount network shares or store their
-credentials. The Home Assistant app is restricted to administrators, who can
-configure cameras, request scans and browse recordings.
+credentials. All Home Assistant users can open the app, browse the timeline and play recordings.
+Only administrators see Cameras and can change configuration or request manual scans.
 
 The published add-on supports `amd64` and `aarch64`. Its SQLite index is stored
 under `/data` and included in cold backups. Generated thumbnails are excluded

@@ -45,6 +45,19 @@ function setup(videos) {
   return context;
 }
 
+// The last frames must play even when the index overestimates actual duration.
+{
+  const tail = video({time:3.85, buffered:0.15});
+  tail.duration = 4;
+  tail.parentElement.dataset.duration = '6';
+  const ctx = setup([tail]);
+  assert.equal(ctx.videoHasPlaybackBuffer(tail), true);
+  ctx.enterBufferingBarrier(null, null);
+  assert.equal(ctx.videoHasPlaybackBuffer(tail), true);
+  tail.currentTime = 4; tail.ended = true;
+  assert.equal(ctx.videoReachedEnd(tail), true, 'ended must escape the barrier');
+}
+
 // A starved camera must preserve its source and the healthy cameras' buffers.
 {
   const slow = video(), healthy = video({buffered: 5});

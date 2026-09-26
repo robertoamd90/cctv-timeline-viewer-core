@@ -40,7 +40,10 @@ function videoTargetTime(video, globalTime = S.currentTime) {
     parseFloat(cell.dataset.start),
     parseFloat(cell.dataset.streamOffset) || 0,
     parseFloat(cell.dataset.streamSpeed) || 1,
-    parseFloat(cell.dataset.duration),
+    // Native files have a final browser duration. Never seek into an indexed
+    // tail that does not exist: recovery would retry that impossible target.
+    // Progressive/HLS durations may still grow, so retain their source target.
+    cell.dataset.streamTransport === 'native' ? videoBufferDuration(video) : parseFloat(cell.dataset.duration),
   );
 }
 

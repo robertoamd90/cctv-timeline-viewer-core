@@ -45,6 +45,31 @@ function setup(videos) {
   return context;
 }
 
+// A seek in an overestimated native tail must converge, including after Pause/Play.
+{
+  const native = video({time: 4, buffered: 0, transport: 'native', played: false});
+  native.duration = 4;
+  native.parentElement.dataset.duration = '6';
+  const ctx = setup([native]);
+  ctx.S.currentTime = 104.7;
+  assert.equal(ctx.videoTargetTime(native), 3.95);
+  assert.equal(ctx.alignVideos([native]), true, 'do not retry the unreachable 4.7s target');
+  native.currentTime = 3.95;
+  ctx.enterBufferingBarrier(null, null);
+  assert.equal(ctx.videoHasPlaybackBuffer(native), true);
+  assert.equal(ctx.alignVideos([native]), true);
+  for (const duration of [NaN, Infinity]) {
+    native.duration = duration;
+    assert.ok(Math.abs(ctx.videoTargetTime(native) - 4.7) < 1e-8);
+  }
+  for (const transport of ['mp4', 'hls']) {
+    native.duration = 4;
+    native.parentElement.dataset.streamTransport = transport;
+    assert.ok(Math.abs(ctx.videoTargetTime(native) - 4.7) < 1e-8,
+      'a growing transcoded duration must not move the requested position backwards');
+  }
+}
+
 // The last frames must play even when the index overestimates actual duration.
 {
   const tail = video({time:3.85, buffered:0.15});

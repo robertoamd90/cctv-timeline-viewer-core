@@ -9,7 +9,7 @@ class ThumbnailCommandTests(unittest.TestCase):
     def test_thumbnail_generation_uses_one_decoder_filter_and_encoder_thread(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(thumbnailer, "THUMBNAIL_DIR", tmp), \
-             patch.object(thumbnailer.subprocess, "run") as run:
+             patch.object(thumbnailer, "run_process") as run:
             thumbnailer.generate_thumbnail(7, "/video/input.mp4")
 
         command = run.call_args.args[0]

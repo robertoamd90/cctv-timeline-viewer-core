@@ -1,3 +1,4 @@
+from ctv_server.lifecycle import stopping, ShutdownRequested, check_running
 import logging
 import os
 import sqlite3
@@ -75,11 +76,18 @@ def _discard_thumbnail_updates(updates: list[tuple[str, int]]):
 
 
 def _generate_thumbnails(camera_id: int, key: str, expected_generation: int):
+    try:
+        _generate_thumbnails_work(camera_id, key, expected_generation)
+    except ShutdownRequested:
+        return
+
+
+def _generate_thumbnails_work(camera_id: int, key: str, expected_generation: int):
     # Thumbnails are disposable derived data and must never keep the recovery
     # operation busy. Generation checks prevent stale workers writing after a
     # rebuild has started.
     with _thumbnail_worker:
-        if expected_generation != index_generation():
+        if stopping.is_set() or expected_generation != index_generation():
             return
         conn = get_db()
         rows = conn.execute(
@@ -90,18 +98,18 @@ def _generate_thumbnails(camera_id: int, key: str, expected_generation: int):
         conn.close()
         updates = []
         for row in rows:
-            if expected_generation != index_generation():
+            if stopping.is_set() or expected_generation != index_generation():
                 _discard_thumbnail_updates(updates)
                 return
             thumb = generate_thumbnail(row["id"], row["path"])
             if thumb:
                 updates.append((thumb, row["id"]))
-        if expected_generation != index_generation():
+        if stopping.is_set() or expected_generation != index_generation():
             _discard_thumbnail_updates(updates)
             return
         if updates:
             with write_db() as conn:
-                if expected_generation != index_generation():
+                if stopping.is_set() or expected_generation != index_generation():
                     _discard_thumbnail_updates(updates)
                     return
                 conn.executemany(
@@ -233,10 +241,15 @@ def _run_partition_scan(
         ).start()
         # Enrichment is optional: its failure must not invalidate a successful scan.
         from ctv_server.recording_events import enrich_partition
+        check_running()
         enrich_partition(camera_id, key, job_generation)
         emit("recording_events", {"camera_id": camera_id, "partition": key})
         return payload
+    except ShutdownRequested:
+        return {"camera_id": camera_id, "status": "interrupted"}
     except Exception as exc:
+        if stopping.is_set():
+            return {"camera_id": camera_id, "status": "interrupted"}
         details = sqlite_error_details(exc) if isinstance(exc, sqlite3.Error) else str(exc)
         message = f"{stage}: {details}"
         log.warning(

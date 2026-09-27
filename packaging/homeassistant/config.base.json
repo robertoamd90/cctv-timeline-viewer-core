@@ -10,7 +10,7 @@
   ],
   "startup": "application",
   "boot": "auto",
-  "init": false,
+  "init": true,
   "legacy": true,
   "apparmor": true,
   "stage": "experimental",
@@ -42,6 +42,7 @@
   },
   "watchdog": "http://[HOST]:[PORT:8000]/api/health",
   "backup": "cold",
+  "timeout": 30,
   "backup_exclude": [
     "/data/thumbnails/**"
   ]

@@ -1,3 +1,6 @@
+import logging
+from ctv_server.lifecycle import stopping, check_running
+
 import sqlite3
 import os
 import tempfile
@@ -28,8 +31,12 @@ def get_db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=30000")
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        conn.close()
+        raise
     return conn
 
 
@@ -40,16 +47,25 @@ def close_db():
 @contextmanager
 def write_db():
     """Serialize SQLite writers while allowing WAL readers to continue."""
-    with _WRITE_LOCK:
+    check_running()
+    while not _WRITE_LOCK.acquire(timeout=0.2):
+        check_running()
+    try:
+        check_running()
         conn = get_db()
+        conn.set_progress_handler(lambda: int(stopping.is_set()), 1000)
         try:
             yield conn
+            check_running()
             conn.commit()
         except Exception:
+            conn.set_progress_handler(None, 0)
             conn.rollback()
             raise
         finally:
             conn.close()
+    finally:
+        _WRITE_LOCK.release()
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -175,189 +191,194 @@ def init_db():
     """Inizializza schema DB (idempotente)."""
     _verify_sqlite_temp_directory()
     conn = get_db()
-    # WAL is persistent database state. Setting it once at startup avoids a
-    # filesystem lock and journal probe on every request connection.
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS cameras (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            source_path TEXT NOT NULL,
-            timezone TEXT DEFAULT 'UTC',
-            time_offset_seconds REAL NOT NULL DEFAULT 0,
-            config TEXT DEFAULT '{}',
-            indexing_mode TEXT NOT NULL DEFAULT 'partitioned',
-            directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}',
-            source_status TEXT NOT NULL DEFAULT 'unknown',
-            source_error TEXT,
-            last_scan_started REAL,
-            last_scan_completed REAL
-        );
+    try:
+        # WAL is persistent database state. Setting it once at startup avoids a
+        # filesystem lock and journal probe on every request connection.
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if mode != "wal":
+            raise RuntimeError(f"SQLite WAL unavailable: {mode}")
+        logging.getLogger("ctv.db").info("SQLite journal=%s busy_timeout=30000ms", mode)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS cameras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                timezone TEXT DEFAULT 'UTC',
+                time_offset_seconds REAL NOT NULL DEFAULT 0,
+                config TEXT DEFAULT '{}',
+                indexing_mode TEXT NOT NULL DEFAULT 'partitioned',
+                directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}',
+                source_status TEXT NOT NULL DEFAULT 'unknown',
+                source_error TEXT,
+                last_scan_started REAL,
+                last_scan_completed REAL
+            );
 
-        CREATE TABLE IF NOT EXISTS recordings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
-            path TEXT NOT NULL,
-            filename TEXT NOT NULL,
-            start_ts REAL NOT NULL,
-            end_ts REAL,
-            duration REAL,
-            codec TEXT,
-            resolution TEXT,
-            fps REAL,
-            size INTEGER,
-            mtime REAL,
-            hash TEXT,
-            thumbnail_path TEXT,
-            metadata TEXT DEFAULT '{}',
-            partition_key TEXT,
-            media_kind TEXT NOT NULL DEFAULT 'video',
-            availability TEXT NOT NULL DEFAULT 'available',
-            last_seen REAL,
-            UNIQUE(camera_id, path)
-        );
+            CREATE TABLE IF NOT EXISTS recordings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                start_ts REAL NOT NULL,
+                end_ts REAL,
+                duration REAL,
+                codec TEXT,
+                resolution TEXT,
+                fps REAL,
+                size INTEGER,
+                mtime REAL,
+                hash TEXT,
+                thumbnail_path TEXT,
+                metadata TEXT DEFAULT '{}',
+                partition_key TEXT,
+                media_kind TEXT NOT NULL DEFAULT 'video',
+                availability TEXT NOT NULL DEFAULT 'available',
+                last_seen REAL,
+                UNIQUE(camera_id, path)
+            );
 
-        CREATE INDEX IF NOT EXISTS idx_recordings_camera ON recordings(camera_id);
-        CREATE INDEX IF NOT EXISTS idx_recordings_start ON recordings(start_ts);
-        CREATE INDEX IF NOT EXISTS idx_recordings_range ON recordings(camera_id, start_ts, end_ts);
-        CREATE INDEX IF NOT EXISTS idx_recordings_end
-            ON recordings(camera_id, COALESCE(end_ts, start_ts) DESC);
+            CREATE INDEX IF NOT EXISTS idx_recordings_camera ON recordings(camera_id);
+            CREATE INDEX IF NOT EXISTS idx_recordings_start ON recordings(start_ts);
+            CREATE INDEX IF NOT EXISTS idx_recordings_range ON recordings(camera_id, start_ts, end_ts);
+            CREATE INDEX IF NOT EXISTS idx_recordings_end
+                ON recordings(camera_id, COALESCE(end_ts, start_ts) DESC);
 
-        CREATE TABLE IF NOT EXISTS partitions (
-            camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
-            partition_key TEXT NOT NULL,
-            path TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'unknown',
-            error TEXT,
-            last_requested REAL,
-            last_scanned REAL,
-            file_count INTEGER NOT NULL DEFAULT 0,
-            progress_done INTEGER NOT NULL DEFAULT 0,
-            progress_total INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(camera_id, partition_key)
-        );
-        CREATE INDEX IF NOT EXISTS idx_partitions_requested ON partitions(last_requested);
+            CREATE TABLE IF NOT EXISTS partitions (
+                camera_id INTEGER NOT NULL REFERENCES cameras(id) ON DELETE CASCADE,
+                partition_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'unknown',
+                error TEXT,
+                last_requested REAL,
+                last_scanned REAL,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                progress_done INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(camera_id, partition_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_partitions_requested ON partitions(last_requested);
 
-        CREATE TABLE IF NOT EXISTS stream_profiles (
-            name TEXT PRIMARY KEY,
-            scale_percent INTEGER NOT NULL,
-            fps INTEGER NOT NULL,
-            bitrate_kbps INTEGER NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS stream_profiles (
+                name TEXT PRIMARY KEY,
+                scale_percent INTEGER NOT NULL,
+                fps INTEGER NOT NULL,
+                bitrate_kbps INTEGER NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS playback_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            max_transcoders INTEGER NOT NULL,
-            hls_temp_mb INTEGER NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS playback_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                max_transcoders INTEGER NOT NULL,
+                hls_temp_mb INTEGER NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS autoscan_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            enabled INTEGER NOT NULL DEFAULT 0,
-            interval_minutes INTEGER NOT NULL DEFAULT 60
-        );
-        INSERT OR IGNORE INTO autoscan_settings(id) VALUES (1);
+            CREATE TABLE IF NOT EXISTS autoscan_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL DEFAULT 0,
+                interval_minutes INTEGER NOT NULL DEFAULT 60
+            );
+            INSERT OR IGNORE INTO autoscan_settings(id) VALUES (1);
 
-        CREATE TABLE IF NOT EXISTS schema_state (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
+            CREATE TABLE IF NOT EXISTS schema_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
 
-        CREATE TABLE IF NOT EXISTS camera_recording_counts (
-            camera_id INTEGER PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
-            recordings_available INTEGER NOT NULL DEFAULT 0,
-            recordings_missing INTEGER NOT NULL DEFAULT 0
-        );
-    """)
-    conn.execute(
-        "INSERT OR IGNORE INTO playback_settings VALUES (1, ?, ?)",
-        (max(0, int(os.environ.get("CTV_MAX_TRANSCODERS", "0"))),
-         max(16, int(os.environ.get("CTV_HLS_TEMP_MB", "256")))),
-    )
-    conn.executemany(
-        """
-        INSERT OR IGNORE INTO stream_profiles (name, scale_percent, fps, bitrate_kbps)
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            ("balanced", 50, 15, 1200),
-            ("fast", 30, 8, 450),
-        ),
-    )
-    # Migrazioni additive per database creati dalle versioni PoC.
-    _add_columns(conn, "cameras", (
-        "time_offset_seconds REAL NOT NULL DEFAULT 0",
-        "ha_event_entities TEXT NOT NULL DEFAULT ''",
-        "autoscan_last_attempt REAL",
-        "autoscan_last_day TEXT",
-        "event_overlay_position TEXT NOT NULL DEFAULT 'top-right'",
-        "indexing_mode TEXT NOT NULL DEFAULT 'partitioned'",
-        "directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}'",
-        "source_status TEXT NOT NULL DEFAULT 'unknown'",
-        "source_error TEXT",
-        "last_scan_started REAL",
-        "last_scan_completed REAL",
-    ))
-    _add_columns(conn, "recordings", (
-        "ha_events TEXT NOT NULL DEFAULT '[]'",
-        "ha_events_status TEXT NOT NULL DEFAULT 'pending'",
-        "ha_events_checked REAL",
-        "ha_events_signature TEXT",
-        "autoscan_settled INTEGER NOT NULL DEFAULT 0",
-        "ha_events_version INTEGER NOT NULL DEFAULT 1",
-        "mtime REAL",
-        "partition_key TEXT",
-        "media_kind TEXT NOT NULL DEFAULT 'video'",
-        "availability TEXT NOT NULL DEFAULT 'available'",
-        "last_seen REAL",
-    ))
-    _add_columns(conn, "partitions", (
-        "progress_done INTEGER NOT NULL DEFAULT 0",
-        "progress_total INTEGER NOT NULL DEFAULT 0",
-    ))
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_availability ON recordings(camera_id, availability)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_partition ON recordings(camera_id, partition_key)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_recordings_camera_available_start "
-        "ON recordings(camera_id, availability, start_ts)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_recordings_partition_time "
-        "ON recordings(camera_id, partition_key, availability, start_ts)"
-    )
-    # v0.1.27 beta initially used an R-Tree maintained by triggers. Detach it
-    # before any recording cleanup so an unusable virtual table cannot block
-    # startup, scans or rebuilds on existing databases.
-    retire_recording_range_index(conn)
-    image_thumbnails = [
-        row[0] for row in conn.execute("""
-            SELECT thumbnail_path FROM recordings
-            WHERE (media_kind = 'image' OR lower(path) LIKE '%.jpg'
-                   OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.png')
-              AND thumbnail_path IS NOT NULL
-        """).fetchall()
-    ]
-    conn.execute("""
-        DELETE FROM recordings
-        WHERE media_kind = 'image' OR lower(path) LIKE '%.jpg'
-           OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.png'
-    """)
-    legacy_thumbnails = [
-        row[0] for row in conn.execute("""
-            SELECT r.thumbnail_path FROM recordings r
-            JOIN cameras c ON c.id = r.camera_id
-            WHERE c.indexing_mode = 'partitioned' AND r.partition_key IS NULL
-              AND r.thumbnail_path IS NOT NULL
-        """).fetchall()
-    ]
-    conn.execute("""
-        DELETE FROM recordings
-        WHERE partition_key IS NULL
-          AND camera_id IN (SELECT id FROM cameras WHERE indexing_mode = 'partitioned')
-    """)
-    _init_recording_counts(conn)
-    conn.commit()
-    conn.close()
+            CREATE TABLE IF NOT EXISTS camera_recording_counts (
+                camera_id INTEGER PRIMARY KEY REFERENCES cameras(id) ON DELETE CASCADE,
+                recordings_available INTEGER NOT NULL DEFAULT 0,
+                recordings_missing INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+        conn.execute(
+            "INSERT OR IGNORE INTO playback_settings VALUES (1, ?, ?)",
+            (max(0, int(os.environ.get("CTV_MAX_TRANSCODERS", "0"))),
+             max(16, int(os.environ.get("CTV_HLS_TEMP_MB", "256")))),
+        )
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO stream_profiles (name, scale_percent, fps, bitrate_kbps)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                ("balanced", 50, 15, 1200),
+                ("fast", 30, 8, 450),
+            ),
+        )
+        # Migrazioni additive per database creati dalle versioni PoC.
+        _add_columns(conn, "cameras", (
+            "time_offset_seconds REAL NOT NULL DEFAULT 0",
+            "ha_event_entities TEXT NOT NULL DEFAULT ''",
+            "autoscan_last_attempt REAL",
+            "autoscan_last_day TEXT",
+            "event_overlay_position TEXT NOT NULL DEFAULT 'top-right'",
+            "indexing_mode TEXT NOT NULL DEFAULT 'partitioned'",
+            "directory_pattern TEXT NOT NULL DEFAULT '{YYYY}/{MM}/{DD}'",
+            "source_status TEXT NOT NULL DEFAULT 'unknown'",
+            "source_error TEXT",
+            "last_scan_started REAL",
+            "last_scan_completed REAL",
+        ))
+        _add_columns(conn, "recordings", (
+            "ha_events TEXT NOT NULL DEFAULT '[]'",
+            "ha_events_status TEXT NOT NULL DEFAULT 'pending'",
+            "ha_events_checked REAL",
+            "ha_events_signature TEXT",
+            "autoscan_settled INTEGER NOT NULL DEFAULT 0",
+            "ha_events_version INTEGER NOT NULL DEFAULT 1",
+            "mtime REAL",
+            "partition_key TEXT",
+            "media_kind TEXT NOT NULL DEFAULT 'video'",
+            "availability TEXT NOT NULL DEFAULT 'available'",
+            "last_seen REAL",
+        ))
+        _add_columns(conn, "partitions", (
+            "progress_done INTEGER NOT NULL DEFAULT 0",
+            "progress_total INTEGER NOT NULL DEFAULT 0",
+        ))
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_availability ON recordings(camera_id, availability)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_partition ON recordings(camera_id, partition_key)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_camera_available_start "
+            "ON recordings(camera_id, availability, start_ts)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_recordings_partition_time "
+            "ON recordings(camera_id, partition_key, availability, start_ts)"
+        )
+        # v0.1.27 beta initially used an R-Tree maintained by triggers. Detach it
+        # before any recording cleanup so an unusable virtual table cannot block
+        # startup, scans or rebuilds on existing databases.
+        retire_recording_range_index(conn)
+        image_thumbnails = [
+            row[0] for row in conn.execute("""
+                SELECT thumbnail_path FROM recordings
+                WHERE (media_kind = 'image' OR lower(path) LIKE '%.jpg'
+                       OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.png')
+                  AND thumbnail_path IS NOT NULL
+            """).fetchall()
+        ]
+        conn.execute("""
+            DELETE FROM recordings
+            WHERE media_kind = 'image' OR lower(path) LIKE '%.jpg'
+               OR lower(path) LIKE '%.jpeg' OR lower(path) LIKE '%.png'
+        """)
+        legacy_thumbnails = [
+            row[0] for row in conn.execute("""
+                SELECT r.thumbnail_path FROM recordings r
+                JOIN cameras c ON c.id = r.camera_id
+                WHERE c.indexing_mode = 'partitioned' AND r.partition_key IS NULL
+                  AND r.thumbnail_path IS NOT NULL
+            """).fetchall()
+        ]
+        conn.execute("""
+            DELETE FROM recordings
+            WHERE partition_key IS NULL
+              AND camera_id IN (SELECT id FROM cameras WHERE indexing_mode = 'partitioned')
+        """)
+        _init_recording_counts(conn)
+        conn.commit()
+    finally:
+        conn.close()
     for thumbnail in legacy_thumbnails:
         try:
             os.unlink(thumbnail)

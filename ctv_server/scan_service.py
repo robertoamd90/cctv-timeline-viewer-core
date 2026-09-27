@@ -1,3 +1,4 @@
+from ctv_server.lifecycle import stopping, ShutdownRequested, check_running
 import logging
 import threading
 import time
@@ -67,6 +68,7 @@ def run_camera_scan(
         conn.close()
         thumbnail_updates = []
         for index, row in enumerate(rows):
+            check_running()
             try:
                 thumb = generate_thumbnail(row["id"], row["path"])
                 if thumb:
@@ -93,7 +95,11 @@ def run_camera_scan(
         payload = {"camera_id": camera_id, "status": "done", **result}
         emit("scan", payload)
         return payload
+    except ShutdownRequested:
+        return {"camera_id": camera_id, "status": "interrupted"}
     except Exception as exc:
+        if stopping.is_set():
+            return {"camera_id": camera_id, "status": "interrupted"}
         message = str(exc)
         log.warning("Scan failed for camera %d: %s", camera_id, message)
         with write_db() as conn:

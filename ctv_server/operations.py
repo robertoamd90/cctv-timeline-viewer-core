@@ -1,3 +1,5 @@
+from ctv_server.lifecycle import stopping
+
 import threading
 import time
 from contextlib import contextmanager
@@ -22,7 +24,7 @@ def index_generation() -> int:
 def begin_index_job(expected_generation: Optional[int] = None) -> bool:
     global _active_index_jobs
     with _guard:
-        if _maintenance_active or (
+        if stopping.is_set() or _maintenance_active or (
             expected_generation is not None and expected_generation != _index_generation
         ):
             return False

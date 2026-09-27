@@ -3,6 +3,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from ctv_server.lifecycle import stopping
 from ctv_server.db import get_db, write_db
 from ctv_server.operations import index_generation
 from ctv_server.partitioner import partition_key, resolve_partition
@@ -25,7 +26,7 @@ def run_due_autoscans(stop=None):
     finally:
         conn.close()
     for camera_id in ids:
-        if stop is not None and stop.is_set():
+        if stopping.is_set() or (stop is not None and stop.is_set()):
             return
         now = time.time()
         generation = index_generation()

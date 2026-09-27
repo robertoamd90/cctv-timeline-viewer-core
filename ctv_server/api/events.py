@@ -1,5 +1,7 @@
 import asyncio
 import json
+import time
+from ctv_server.lifecycle import stopping
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from ctv_server.auth import current_user
@@ -42,16 +44,19 @@ async def _event_stream(request: Request):
     try:
         # Evento iniziale di connessione
         yield "event: connected\ndata: {}\n\n"
-        while True:
+        heartbeat = time.monotonic()
+        while not stopping.is_set():
             disconnected = await request.is_disconnected()
             if disconnected:
                 break
             try:
-                event_type, data = await asyncio.wait_for(q.get(), timeout=15.0)
+                event_type, data = await asyncio.wait_for(q.get(), timeout=1.0)
                 payload = data if user.is_admin else _sanitize(data)
                 yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
             except asyncio.TimeoutError:
-                yield ": keepalive\n\n"
+                if time.monotonic() - heartbeat >= 15:
+                    heartbeat = time.monotonic()
+                    yield ": keepalive\n\n"
     finally:
         _listeners.remove(q)
 

@@ -2,18 +2,20 @@ import os
 import asyncio
 import logging
 import mimetypes
+import sqlite3
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 import uuid
 import anyio
 from ctv_server import playback
+from ctv_server.lifecycle import stopping, ShutdownRequested
 from ctv_server.models import PlaybackRequest
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from ctv_server.db import close_db, init_db, get_db
+from ctv_server.db import close_db, init_db, get_db, sqlite_error_details
 from ctv_server.api import cameras, recordings, scan, timeline, search, events, system
 from ctv_server.auth import user_from_request
 from ctv_server.config import is_home_assistant, trusted_ingress_proxies
@@ -106,6 +108,7 @@ class VideoFileResponse(FileResponse):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown events."""
+    stopping.clear()
     log.info("Initializing database…")
     init_db()
     from ctv_server.autoscan import recover_interrupted_scans
@@ -117,8 +120,14 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        _watcher_task.cancel()
+        stopping.set()
         await shutdown_hls_jobs()
+        try:
+            await asyncio.wait_for(asyncio.shield(_watcher_task), timeout=15)
+        except asyncio.TimeoutError:
+            log.warning("Autoscan did not finish within shutdown grace period")
+            _watcher_task.cancel()
+            await asyncio.gather(_watcher_task, return_exceptions=True)
         close_db()
         log.info("CTV server shutting down")
 
@@ -133,6 +142,9 @@ app = FastAPI(
 
 @app.middleware("http")
 async def deployment_security(request, call_next):
+    if stopping.is_set():
+        return JSONResponse(status_code=503, content={"detail": "shutting_down"},
+                            headers={"Retry-After": "2"})
     if is_home_assistant():
         client_host = request.client.host if request.client else ""
         if client_host not in trusted_ingress_proxies():
@@ -167,12 +179,11 @@ app.include_router(system.router)
 
 @app.get("/api/health", tags=["system"])
 def health():
-    conn = get_db()
-    cameras = conn.execute(
-        "SELECT source_status, COUNT(*) AS count FROM cameras GROUP BY source_status"
-    ).fetchall()
-    conn.execute("SELECT 1").fetchone()
-    conn.close()
+    with closing(get_db()) as conn:
+        cameras = conn.execute(
+            "SELECT source_status, COUNT(*) AS count FROM cameras GROUP BY source_status"
+        ).fetchall()
+        conn.execute("SELECT 1").fetchone()
     by_status = {row["source_status"]: row["count"] for row in cameras}
     return {
         "status": "ok" if not by_status.get("offline") else "degraded",
@@ -183,11 +194,10 @@ def health():
 
 # ── Video serving ──
 def _stream_recording(recording_id: int, start: float):
-    conn = get_db()
-    row = conn.execute(
-        "SELECT path, availability, duration FROM recordings WHERE id = ?", (recording_id,)
-    ).fetchone()
-    conn.close()
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT path, availability, duration FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Recording not found")
     if row["availability"] != "available":
@@ -202,11 +212,10 @@ def _stream_recording(recording_id: int, start: float):
 
 @app.get("/video/{recording_id}")
 def serve_video(recording_id: int):
-    conn = get_db()
-    row = conn.execute(
-        "SELECT path, availability, duration FROM recordings WHERE id = ?", (recording_id,)
-    ).fetchone()
-    conn.close()
+    with closing(get_db()) as conn:
+        row = conn.execute(
+            "SELECT path, availability, duration FROM recordings WHERE id = ?", (recording_id,)
+        ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Recording not found")
     if row["availability"] != "available":
@@ -217,6 +226,17 @@ def serve_video(recording_id: int):
     # FileResponse gestisce nativamente i range request (Content-Range)
     media_type = mimetypes.guess_type(filepath)[0] or "application/octet-stream"
     return VideoFileResponse(filepath, media_type=media_type, expected_duration=row["duration"])
+
+
+@app.exception_handler(sqlite3.OperationalError)
+async def database_operational_error(request, exc):
+    code = getattr(exc, "sqlite_errorcode", 0) or 0
+    if code & 0xff not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        raise exc
+    log.warning("Database temporarily unavailable on %s: %s",
+                request.url.path, sqlite_error_details(exc))
+    return JSONResponse(status_code=503, content={"detail": "database_busy"},
+                        headers={"Retry-After": "2"})
 
 
 @app.exception_handler(playback.PlaybackUnavailable)
@@ -392,12 +412,21 @@ async def _background_watcher():
     import threading
     stop = threading.Event()
     try:
-        await asyncio.sleep(10)
-        while True:
+        for _ in range(10):
+            if stopping.is_set():
+                return
+            await asyncio.sleep(1)
+        while not stopping.is_set():
             try:
                 await asyncio.to_thread(run_due_autoscans, stop)
+            except ShutdownRequested:
+                break
             except Exception as exc:
-                log.error("Autoscan error: %s", exc)
-            await asyncio.sleep(10)
+                if not stopping.is_set():
+                    log.error("Autoscan error: %s", exc)
+            for _ in range(10):
+                if stopping.is_set():
+                    break
+                await asyncio.sleep(1)
     finally:
         stop.set()

@@ -65,6 +65,9 @@ jobs:
           assert set(app["arch"]) == {"amd64", "aarch64"}
           assert set(beta["arch"]) == {"amd64", "aarch64"}
           assert app["ingress"] is True and app["ingress_stream"] is True
+          assert app["init"] is True and beta["init"] is True
+          assert app["timeout"] == 30 and beta["timeout"] == 30
+          assert app["backup"] == "cold" and beta["backup"] == "cold"
           assert app["panel_admin"] is False
           assert beta["panel_admin"] is False
           assert str(app["environment"]["CTV_HA_ADMIN_ONLY"]) == "0"
@@ -79,6 +82,7 @@ jobs:
           assert any(item.get("type") == "media" and item.get("read_only") for item in app["map"])
           with open("addons/cctv_viewer/apparmor.txt", encoding="utf-8") as handle:
               apparmor = handle.read()
+          assert "/sbin/docker-init ixr," in apparmor
           assert "/media/ r," in apparmor
           assert "/media/** r," in apparmor
           with open("addons/cctv_viewer_beta/apparmor.txt", encoding="utf-8") as handle:
@@ -94,3 +98,18 @@ jobs:
           docker run --rm --entrypoint python --workdir /data
           --env PYTHONPATH= cctv-viewer:ci
           -c "import ctv_server.main; print('ctv_server import: passed')"
+
+      - name: Verify container init and graceful shutdown
+        run: |
+          docker run -d --init --stop-timeout 30 --name ctv-shutdown cctv-viewer:ci
+          trap 'docker logs ctv-shutdown; docker rm -f ctv-shutdown' EXIT
+          for attempt in $(seq 1 20); do
+            if docker exec ctv-shutdown python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=2)"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec ctv-shutdown python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=2)"
+          docker stop ctv-shutdown
+          code=$(docker inspect --format '{{.State.ExitCode}}' ctv-shutdown)
+          test "$code" = 0 || test "$code" = 143

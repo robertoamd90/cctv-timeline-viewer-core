@@ -1,4 +1,6 @@
 """Serialize partition scans; queued interactive requests precede background work."""
+from ctv_server.lifecycle import stopping
+
 import threading
 from contextlib import contextmanager
 
@@ -13,14 +15,15 @@ def partition_slot(background=False):
     admitted = False
     with _condition:
         if background:
-            if not _running and not _foreground_waiters:
+            if not stopping.is_set() and not _running and not _foreground_waiters:
                 _running = admitted = True
         else:
             _foreground_waiters += 1
             try:
-                while _running:
-                    _condition.wait()
-                _running = admitted = True
+                while _running and not stopping.is_set():
+                    _condition.wait(0.2)
+                if not stopping.is_set():
+                    _running = admitted = True
             finally:
                 _foreground_waiters -= 1
     try:

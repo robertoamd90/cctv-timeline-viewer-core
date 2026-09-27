@@ -1,3 +1,5 @@
+from ctv_server.lifecycle import check_running, run_process, ShutdownRequested
+
 import os
 import subprocess
 from typing import Optional
@@ -12,7 +14,7 @@ def generate_thumbnail(recording_id: int, filepath: str, width: int = 320) -> Op
     out_path = os.path.join(THUMBNAIL_DIR, f"{recording_id}.jpg")
 
     try:
-        subprocess.run(
+        run_process(
             [
                 "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-y", "-filter_threads", "1", "-ss", "1",
@@ -23,5 +25,5 @@ def generate_thumbnail(recording_id: int, filepath: str, width: int = 320) -> Op
             capture_output=True, check=True, timeout=30,
         )
         return out_path
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ShutdownRequested):
         return None

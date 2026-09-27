@@ -1,3 +1,4 @@
+from ctv_server.lifecycle import check_running
 import os
 import logging
 import threading
@@ -60,6 +61,7 @@ def index_camera(
     # Tutto il lavoro lento avviene senza una transazione SQLite aperta.
     changed_media = []
     for media in files:
+        check_running()
         previous = existing.get(media["path"])
         same_mtime = previous and previous[1] is not None and abs(previous[1] - media["mtime"]) < 0.001
         if previous and previous[0] == media["size"] and same_mtime and (not incremental or previous[2]):
@@ -74,6 +76,7 @@ def index_camera(
         progress(counts["skipped"], len(files))
 
     def prepare_media(media: dict) -> tuple:
+        check_running()
         start_ts = extract_timestamp(media["filename"], media["path"], timezone)
         media_kind = "video"
         meta = parse_ffprobe(get_ffprobe_data(media["path"]))
@@ -94,6 +97,7 @@ def index_camera(
         pending = {}
 
         def submit_next() -> bool:
+            check_running()
             try:
                 media = next(media_iterator)
             except StopIteration:
@@ -123,6 +127,7 @@ def index_camera(
             len(missing_durations), examples,
         )
 
+    check_running()
     with write_db() as conn:
         scope = "camera_id = ?"
         scope_params: tuple = (camera_id,)

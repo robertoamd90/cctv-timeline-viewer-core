@@ -1,3 +1,5 @@
+from ctv_server.lifecycle import check_running, run_process
+
 import os
 import re
 import hashlib
@@ -31,9 +33,11 @@ def scan_directory(source_path: str, skip_paths: Optional[set[str]] = None) -> l
     files = []
     pending_directories = [source_path]
     while pending_directories:
+        check_running()
         directory = pending_directories.pop()
         with os.scandir(directory) as entries:
             for entry in entries:
+                check_running()
                 if skip_paths and entry.path in skip_paths:
                     continue
                 if entry.is_dir(follow_symlinks=False):
@@ -84,7 +88,7 @@ def extract_timestamp(filename: str, filepath: str, tz_name: str = "UTC") -> Opt
 def get_ffprobe_data(filepath: str) -> dict:
     """Estrae metadati video via ffprobe."""
     try:
-        result = subprocess.run(
+        result = run_process(
             [
                 "ffprobe", "-v", "error", "-print_format", "json",
                 "-show_format", "-show_streams", filepath,

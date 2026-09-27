@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from ctv_server.db import get_db, write_db
 from ctv_server.operations import index_generation
+from ctv_server.lifecycle import stopping
 
 log = logging.getLogger("ctv.recording_events")
 TYPES = {"person", "vehicle", "animal", "motion", "doorbell"}
@@ -89,6 +90,8 @@ def enrich_partition(camera_id, key, generation):
         _enrich(camera_id, key, generation)
     except Exception:
         # No URLs, tokens or HA payloads in logs. Video indexing remains valid.
+        if stopping.is_set():
+            return
         log.warning("HA enrichment failed for camera %s day %s", camera_id, key)
 
 
@@ -102,7 +105,7 @@ def _enrich(camera_id, key, generation):
                             "AND availability='available'", (camera_id, key)).fetchall()
     finally:
         conn.close()
-    if not rows or generation != index_generation():
+    if not rows or stopping.is_set() or generation != index_generation():
         return
     mapping = parse_mapping(camera["ha_event_entities"])
     offset = camera["time_offset_seconds"] or 0
@@ -146,7 +149,7 @@ def _enrich(camera_id, key, generation):
         updates.append((json.dumps(payload), status, now, row_signature(row), row["ha_events_version"] if failed else 2, row["id"], row["path"]))
     with write_db() as conn:
         current = conn.execute("SELECT ha_event_entities, time_offset_seconds, timezone FROM cameras WHERE id=?", (camera_id,)).fetchone()
-        if generation != index_generation() or not current or any(current[k] != camera[k] for k in current.keys()):
+        if stopping.is_set() or generation != index_generation() or not current or any(current[k] != camera[k] for k in current.keys()):
             return
         conn.executemany("UPDATE recordings SET ha_events=?, ha_events_status=?, ha_events_checked=?, "
                          "ha_events_signature=?, ha_events_version=? WHERE id=? AND path=?", updates)

@@ -288,6 +288,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.dataset.metadataReady = '0';
     v.dataset.driftSeek = '0';
     v.dataset.warming = '0';
+    v._endProgress = null;
     clearFreezeFrame(v);
     empty.hidden = true;
     v.hidden = false;
@@ -665,7 +666,7 @@ function requiredBuffer(video, currentTime = video.currentTime) {
 
 function videoReachedEnd(video) {
   const expectedDuration = parseFloat(video.parentElement.dataset.duration);
-  return CtvMedia.playbackCompleted({
+  const completed = CtvMedia.playbackCompleted({
     ended: video.ended,
     currentTime: video.currentTime,
     actualDuration: video.duration,
@@ -675,6 +676,28 @@ function videoReachedEnd(video) {
     buffering: _wasBuffering,
     warming: video.dataset.warming === '1',
   });
+  if (completed) return true;
+  // Some decoders stop on the final frame without emitting ended. Observe
+  // actual media progress, rather than letting a frozen global clock wait
+  // forever for that event. Never infer EOF from the indexed duration alone.
+  const now = performance.now();
+  const progress = video._endProgress;
+  if (!progress || Math.abs(video.currentTime - progress.time) > 0.001) {
+    video._endProgress = {time: video.currentTime, since: now};
+    return false;
+  }
+  const duration = video.duration;
+  return S.playing && video.dataset.metadataReady === '1' &&
+    video.dataset.hasPlayed === '1' && !video.seeking &&
+    video.networkState === 1 && // NETWORK_IDLE: no download still extending the tail.
+    Number.isFinite(duration) && duration > 0 &&
+    (video.parentElement.dataset.streamTransport !== 'hls' ||
+      (Number.isFinite(expectedDuration) && duration >= expectedDuration - 0.08)) &&
+    video.currentTime >= duration - 0.08 &&
+    video.currentTime <= duration + 0.08 &&
+    video.buffered.length > 0 &&
+    video.buffered.end(video.buffered.length - 1) >= duration - 0.08 &&
+    now - progress.since >= 1500;
 }
 
 function videoHasPlaybackBuffer(video) {

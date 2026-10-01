@@ -145,6 +145,43 @@ for (const transport of ['mp4', 'hls']) {
   assert.equal(ctx.requiredBuffer(tail), 0.25, 'a larger recovery buffer must not stall the recording tail');
 }
 
+// A decoder frozen on its last frame must transition without an ended event.
+for (const transport of ['native', 'mp4', 'hls']) {
+  const tail = video({time: 3.96, buffered: 0.04, transport});
+  tail.duration = 4;
+  tail.ended = false;
+  tail.networkState = 1;
+  tail.parentElement.dataset.duration = transport === 'hls' ? '4' : '6';
+  tail.dataset.recording = '1';
+  const ctx = setup([tail]);
+  let now = 1000;
+  ctx.performance.now = () => now;
+  assert.equal(ctx.videoReachedEnd(tail), false);
+  now += 1499;
+  assert.equal(ctx.videoReachedEnd(tail), false);
+  now++;
+  assert.equal(ctx.videoReachedEnd(tail), true);
+  ctx.S.activeTab = 'timeline';
+  ctx.requestAnimationFrame = () => 1;
+  ctx.onVideoEnded = (v, id) => { ctx.transition = {v, id}; };
+  ctx.clockTick();
+  assert.equal(ctx.transition.v, tail);
+  assert.equal(ctx.transition.id, '1');
+
+  for (const state of ['paused', 'seeking', 'unplayed', 'unbuffered', 'unknownDuration', 'downloading', 'middle']) {
+    ctx.S.playing = state !== 'paused';
+    tail.seeking = state === 'seeking';
+    tail.networkState = state === 'downloading' ? 2 : 1;
+    tail.dataset.hasPlayed = state === 'unplayed' ? '0' : '1';
+    tail.duration = state === 'unknownDuration' ? Infinity : 4;
+    tail.buffered = state === 'unbuffered' ? {length: 0} :
+      {length: 1, start: () => 0, end: () => 4};
+    tail.currentTime = state === 'middle' ? 2 : 3.96;
+    tail._endProgress = {time: tail.currentTime, since: 0};
+    assert.equal(ctx.videoReachedEnd(tail), false, state);
+  }
+}
+
 async function asyncTests() {
   // A delayed admission from an old seek cannot replace the latest video URL.
   const v = video(); v._generation = 1;

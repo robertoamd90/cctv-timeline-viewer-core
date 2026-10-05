@@ -14,12 +14,7 @@ window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
   firstFrames: playbackDiagnostics.firstFrames.slice(),
   bufferingMs: playbackDiagnostics.bufferingMs + (_recoveryStarted == null ? 0 : performance.now() - _recoveryStarted)});
 const _nativeMediaCacheToken = Date.now().toString(36);
-const _nativeFallbacks = new Set();
-
-function effectiveStreamProfile(rec) {
-  return S.streamProfile === 'native' && rec && _nativeFallbacks.has(String(rec.id))
-    ? 'balanced' : S.streamProfile;
-}
+const _failedRecordings = new Map();
 
 function hasCompressedPlayback() {
   return S.streamProfile !== 'native' || getVideos().some(video =>
@@ -28,7 +23,7 @@ function hasCompressedPlayback() {
 
 function playerSourceKey(rec) {
   if (!rec) return '';
-  const profile = effectiveStreamProfile(rec);
+  const profile = S.streamProfile;
   const plan = CtvMedia.playbackPlan(profile, S.speed);
   return `${rec.id}:${profile}:${plan.streamSpeed}:${S.streamProfileRevision}`;
 }
@@ -107,46 +102,8 @@ function resetPlaybackRecovery() {
   finishRecovery();
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
-    video._mediaRetries = {};
   });
   document.getElementById('playback-notice').hidden = true;
-}
-
-// A failed HTTP/decoder load can be transient even when the recording is valid.
-// Retry only the affected source, and bound attempts per recording/transport.
-async function retryMediaSource(video, cameraId, errorCode) {
-  if (![2, 3, 4].includes(errorCode)) return false;
-  const generation = video._generation;
-  if (video._recoveringGeneration === generation) return true;
-  const key = `${video.dataset.recording}:${video.parentElement.dataset.streamTransport}`;
-  const attempts = video._mediaRetries || (video._mediaRetries = {});
-  if ((attempts[key] || 0) >= 2) return false;
-  attempts[key] = (attempts[key] || 0) + 1;
-  video._recoveringGeneration = generation;
-  const epoch = _playbackEpoch;
-  enterBufferingBarrier(video, t('player.buffering'));
-  try {
-    for (let attempt = 0; attempt < 6; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1500);
-      let reachable = false;
-      try { reachable = (await fetch(appUrl('/api/health'), {signal: controller.signal})).ok; }
-      catch (_) { /* Allow a restarting service to return. */ }
-      finally { clearTimeout(timer); }
-      if (generation !== video._generation || epoch !== _playbackEpoch) return true;
-      if (reachable) {
-        playbackDiagnostics.recoveries++;
-        _playerCache[cameraId] = null;
-        renderPlayers();
-        if (S.playing) enterBufferingBarrier(null, null);
-        return true;
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    return false;
-  } finally {
-    if (video._recoveringGeneration === generation) video._recoveringGeneration = null;
-  }
 }
 
 function finishRecovery() {
@@ -154,11 +111,35 @@ function finishRecovery() {
   _recoveryStarted = null;
 }
 
-function failPlayback(code = 'recoveryFailed') {
-  stopPlayback(true);
+function failVideo(video, code = 'unplayable') {
+  const cell = video.parentElement;
+  const recording = cell.dataset.recording;
+  if (!recording) return;
   const known = ['capacity', 'storage_limit', 'encoding', 'recoveryFailed', 'session_expired'];
-  document.getElementById('playback-notice-text').textContent = t(`player.${known.includes(code) ? code : 'unplayable'}`);
-  document.getElementById('playback-notice').hidden = false;
+  const reason = known.includes(code) ? code : 'unplayable';
+  _failedRecordings.set(recording, reason);
+  cancelHlsSource(video);
+  cell.dataset.failed = '1';
+  cell.dataset.buffering = '0';
+  video.dataset.warming = '0';
+  video.hidden = true;
+  clearFreezeFrame(video);
+  cell.querySelector('.empty-state').hidden = true;
+  setPlayerStatus(cell, t(`player.${reason}`), true);
+  // Keep the indexed recording interval. With no playable camera, the global
+  // clock advances through it using wall time and selects the next recording.
+  _clockStartTime = S.currentTime;
+  _clockStartWall = performance.now();
+  updateEventOverlays();
+}
+
+function retryFailedRecordings() {
+  _failedRecordings.clear();
+  getVideos().forEach(video => {
+    if (video.parentElement.dataset.failed === '1') {
+      _playerCache[video.parentElement.dataset.cam] = null;
+    }
+  });
 }
 
 function schedulePausedRelease(video) {
@@ -199,7 +180,7 @@ async function loadCompressedSource(video, request, url) {
     }
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      failPlayback(body.detail);
+      if (generation === video._generation) failVideo(video, body.detail);
       return;
     }
     video.src = url;
@@ -208,7 +189,7 @@ async function loadCompressedSource(video, request, url) {
     if (S.playing) enterBufferingBarrier(null, null);
     else schedulePausedRelease(video);
   } catch (_) {
-    if (generation === video._generation) failPlayback('unplayable');
+    if (generation === video._generation) failVideo(video);
   }
 }
 
@@ -217,6 +198,7 @@ function hasCancelledHlsSources() {
 }
 
 function seekVideo(video) {
+  if (video.parentElement.dataset.failed === '1') return false;
   if (S.currentTime == null || video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
   // Wait for the decoder to finish before issuing another Range-producing
   // seek. Repeated alignment while seeking can cancel every pending download.
@@ -317,10 +299,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
 
   if (rec) {
     const recId = String(rec.id);
-    if (v.dataset.recording !== recId) v._mediaRetries = {};
+    if (v.dataset.recording !== recId) v.dataset.recoveryAttempts = '0';
     const originalDuration = rec.duration ??
       Math.max(0, (rec.end_ts ?? rec.start_ts) - rec.start_ts);
-    const profile = effectiveStreamProfile(rec);
+    const profile = S.streamProfile;
     const plan = CtvMedia.playbackPlan(profile, S.speed);
     const maxOffset = Math.max(0, originalDuration - 0.05);
     const streamOffset = plan.transcoded
@@ -341,6 +323,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
     cell.dataset.transitioning = '';
     cell.dataset.buffering = '1';
     cell.dataset.failed = '0';
+    if (_failedRecordings.has(recId)) {
+      failVideo(v, _failedRecordings.get(recId));
+      return;
+    }
     v.dataset.hasPlayed = '0';
     v.dataset.metadataReady = '0';
     v.dataset.driftSeek = '0';
@@ -425,31 +411,11 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.onstalled = () => {
       if (!videoHasPlaybackBuffer(v)) enterBufferingBarrier(v, t('player.buffering'));
     };
-    v.onerror = async () => {
-      const generation = v._generation;
+    v.onerror = () => {
       const mediaError = v.error;
       console.error('CTV media failure', {recording: recId, transport: cell.dataset.streamTransport,
         code: mediaError?.code, message: mediaError?.message, source: v.currentSrc || v.src});
-      if (await retryMediaSource(v, cid, mediaError?.code)) return;
-      if (v._generation !== generation) return;
-      // Native codec/decoder failures get one compatible H.264 attempt for
-      // this recording. Preserve the selected timeline position and quality
-      // of the other cameras; do not loop through the same rejected source.
-      if (cell.dataset.streamTransport === 'native' &&
-          (mediaError?.code === 3 || mediaError?.code === 4) && !_nativeFallbacks.has(recId)) {
-        _nativeFallbacks.add(recId);
-        renderPlayers();
-        if (S.playing) enterBufferingBarrier(null, null);
-        return;
-      }
-      const jobId = cell.dataset.transcodeJob;
-      const status = jobId ? await fetch(appUrl(`/api/playback-sessions/${jobId}`))
-        .then(response => response.json()).catch(() => ({})) : {};
-      if (v._generation !== generation) return;
-      clearFreezeFrame(v);
-      cell.dataset.failed = '1'; cell.dataset.buffering = '0';
-      setPlayerStatus(cell, t('player.recoveryFailed'), true);
-      failPlayback(status.reason || 'recoveryFailed');
+      failVideo(v);
     };
     // This is a per-browser preference because preload behavior varies by
     // engine and connection. Browsers may still treat it as a hint.
@@ -480,8 +446,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     } else {
       cell.dataset.streamTransport = 'native';
       cell.dataset.hlsCancelled = '0';
-      const retries = v._mediaRetries?.[`${recId}:native`] || 0;
-      v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}&retry=${retries}`);
+      v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}`);
     }
     if (!plan.transcoded) v.load();
     const generation = v._generation;
@@ -538,6 +503,7 @@ function selectedFrameReady(video) {
 }
 
 function clearStatusWhenReady(video) {
+  if (video.parentElement.dataset.failed === '1') return;
   if ((!S.playing && selectedFrameReady(video)) || (S.playing && videoHasPlaybackBuffer(video))) {
     setPlayerStatus(video.parentElement, '');
   }
@@ -595,7 +561,13 @@ function findRecordingAt(cameraId, ts) {
   const cam = S.timeline.cameras.find(c => c.camera_id === cameraId);
   if (!cam) return null;
   const recording = CtvMedia.recordingAt(cam.segments, ts);
-  const profile = effectiveStreamProfile(recording);
+  if (recording && _failedRecordings.has(String(recording.id))) {
+    // A failed compressed file still owns its entire indexed interval, even
+    // the short tail for which no transcoded frame could otherwise be emitted.
+    if (recording.end_ts == null && Number.isFinite(S.timeline.to) && ts >= S.timeline.to) return null;
+    return recording;
+  }
+  const profile = S.streamProfile;
   if (!recording || profile === 'native' || recording.end_ts == null) {
     return recording;
   }
@@ -807,7 +779,7 @@ function absoluteVideoTime(video) {
 
 function restartProgressiveVideo(video) {
   const attempts = (Number(video.dataset.recoveryAttempts) || 0) + 1;
-  if (attempts > 3) { failPlayback(); return false; }
+  if (attempts > 3) { failVideo(video, 'recoveryFailed'); return false; }
   video.dataset.recoveryAttempts = String(attempts);
   playbackDiagnostics.restarts++;
   const cell = video.parentElement;
@@ -924,6 +896,8 @@ function stopPlayback(immediate = false) {
 document.getElementById('btn-play').onclick = () => {
   if (S.playing) { stopPlayback(); return; }
   resetPlaybackRecovery();
+  const hadFailedVideos = getVideos().some(video => video.parentElement.dataset.failed === '1');
+  retryFailedRecordings();
   getVideos().forEach(video => clearTimeout(video._pauseTimer));
   if (S.currentTime == null && S.timeline) {
     const firstSeg = S.timeline.cameras[0]?.segments[0];
@@ -935,6 +909,7 @@ document.getElementById('btn-play').onclick = () => {
     return;
   }
   if (hasCancelledHlsSources()) renderPlayers(true);
+  else if (hadFailedVideos) renderPlayers();
   S.playing = true; updatePlayButton();
   if (typeof selectedEventTypes !== 'undefined' && selectedEventTypes.size) {
     reconcilePlaybackPosition();
@@ -980,6 +955,7 @@ speedSelect.addEventListener('change', () => applyPlaybackSpeed(speedSelect.valu
 document.getElementById('quality-select').onchange = function() {
   S.streamProfile = this.value;
   localStorage.setItem('ctv-stream-profile', S.streamProfile);
+  retryFailedRecordings();
   reloadPlaybackStreams();
 };
 
@@ -1032,7 +1008,15 @@ function startClock() {
 function clockTick() {
   if (!S.playing || S.activeTab !== 'timeline') { _tickId = null; return; }
   if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
-    failPlayback(); return;
+    activeVideos().filter(video => {
+      if (!videoHasPlaybackBuffer(video)) return true;
+      const target = videoTargetTime(video);
+      const cell = video.parentElement;
+      if (cell.dataset.streamTransport === 'mp4' &&
+          Number(cell.dataset.duration) - target <= 0.5) return false;
+      return Math.abs(video.currentTime - target) > 0.1;
+    }).forEach(video => failVideo(video, 'recoveryFailed'));
+    finishRecovery();
   }
   const videos = activeVideos();
   const completed = videos.find(videoReachedEnd);

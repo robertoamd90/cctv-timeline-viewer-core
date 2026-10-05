@@ -2,6 +2,7 @@ import asyncio
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from ctv_server.main import VideoFileResponse
@@ -127,7 +128,7 @@ class Mp4DurationTests(unittest.TestCase):
                 self.assertTrue(messages[-1]['more_body'])
                 self.assertEqual(released, [True])
 
-    def test_video_response_recovers_from_stale_unsatisfiable_range(self):
+    def test_video_response_rejects_unsatisfiable_range(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
             original = fragmented_mp4()
@@ -151,9 +152,37 @@ class Mp4DurationTests(unittest.TestCase):
             start = messages[0]
             headers = {key.decode(): value.decode() for key, value in start["headers"]}
             content = b"".join(message.get("body", b"") for message in messages[1:])
-            self.assertEqual(start["status"], 200)
-            self.assertEqual(headers["cache-control"], "private, no-store")
-            self.assertEqual(content, original)
+            self.assertEqual(start["status"], 416)
+            self.assertEqual(headers["content-range"], f"bytes */{len(original)}")
+
+    def test_ingress_ranges_are_bounded_and_preserve_exact_bytes(self):
+        original = bytes(range(256)) * 20000
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'large.mp4'
+            path.write_bytes(original)
+            for range_header, expected_start, expected_end in [
+                ('bytes=0-', 0, 2097151),
+                ('bytes=100-4000000', 100, 2097251),
+                ('bytes=-3000000', len(original)-3000000, len(original)-3000000+2097151),
+                ('bytes=50-99', 50, 99),
+            ]:
+                messages = []
+                async def send(message):
+                    messages.append(message)
+                async def receive():
+                    await asyncio.Event().wait()
+                with patch('ctv_server.main.is_home_assistant', return_value=True):
+                    asyncio.run(VideoFileResponse(path)({
+                        'type':'http', 'method':'GET',
+                        'headers':[(b'range', range_header.encode())], 'extensions':{},
+                    }, receive, send))
+                headers = dict(messages[0]['headers'])
+                self.assertEqual(messages[0]['status'], 206)
+                self.assertEqual(headers[b'content-range'].decode(),
+                    f'bytes {expected_start}-{expected_end}/{len(original)}')
+                content = b''.join(item.get('body', b'') for item in messages[1:])
+                self.assertEqual(content, original[expected_start:expected_end+1])
+                self.assertEqual(int(headers[b'content-length']), len(content))
 
 
 if __name__ == "__main__":

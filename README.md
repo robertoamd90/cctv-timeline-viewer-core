@@ -282,15 +282,17 @@ for simultaneous compressed streams and an HLS temporary-space budget (256 MiB
 by default). The stream limit covers MP4, HLS and all viewers. Its default `0`
 preserves unlimited concurrency; choose a limit appropriate to the server.
 Lowering this limit affects new admissions, leaving existing streams running.
-If capacity is exhausted, playback pauses with a message and a retry button;
-select fewer cameras or wait for another viewer before retrying. Cameras are
-never silently dropped from a synchronized grid.
+If capacity is exhausted or a recording cannot be played, its tile shows an
+error while healthy cameras and the timeline continue. The cursor traverses the
+failed recording's indexed interval and automatically loads the next recording.
+Pause and resume playback, or change quality, to retry failed recordings.
 
 Compressed playback reuses aligned streams when buffering. A source that
 is already playing uses a lower buffer threshold than a recovering source,
 reducing repeated short pauses. A source that
 cannot be realigned is restarted individually, with a finite retry budget and
-a 30-second recovery timeout. Pausing retains incomplete streams for up to two
+a 30-second recovery timeout. Exhausted recovery marks only the affected tile
+as failed. Pausing retains incomplete streams for up to two
 seconds, then releases them; fully downloaded MP4 buffers can be reused without
 another encode. Leaving the page releases compressed sessions and returning
 does not automatically resume playback. Server watchdogs cover lost client

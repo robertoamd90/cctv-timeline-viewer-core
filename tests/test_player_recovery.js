@@ -6,8 +6,8 @@ const CtvMedia = require('../ctv_web/js/media.js');
 function video({time = 10, buffered = 0, transport = 'mp4', played = true} = {}) {
   return {
     currentTime: time, readyState: 3, seeking: false, hidden: false,
-    dataset: {hasPlayed: played ? '1' : '0', metadataReady: '1', warming: '0'},
-    parentElement: {dataset: {
+    dataset: {recording: '1', hasPlayed: played ? '1' : '0', metadataReady: '1', warming: '0'},
+    parentElement: {querySelector: () => ({hidden:false}), dataset: {
       recording: '1', start: '100', streamOffset: '0', streamSpeed: '1',
       playbackRate: '1', duration: '60', streamTransport: transport,
     }},
@@ -30,7 +30,8 @@ function setup(videos) {
   });
   vm.runInContext(fs.readFileSync(require.resolve('../ctv_web/js/player.js'), 'utf8'), context);
   vm.runInContext(`
-    activeVideos = () => videos;
+    updateEventOverlays = () => {};
+    clearFreezeFrame = () => {};
     showFreezeFrame = () => {};
     setPlayerStatus = (cell, message) => { cell.dataset.buffering = message ? '1' : '0'; };
     restartProgressiveVideo = video => {
@@ -45,20 +46,22 @@ function setup(videos) {
   return context;
 }
 
-// Recovery must not replace a pending native seek on every clock tick.
-{
-  const native = video({transport: 'native'});
-  const ctx = setup([native]);
-  ctx.S.streamProfile = 'native';
-  ctx.getVideos = () => [native];
-  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'native');
-  vm.runInContext("_nativeFallbacks.add('1')", ctx);
-  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'balanced');
-  assert.equal(ctx.effectiveStreamProfile({id: 2}), 'native');
-  native.parentElement.dataset.streamTransport = 'mp4';
-  assert.equal(ctx.hasCompressedPlayback(), true);
-  ctx.S.streamProfile = 'fast';
-  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'fast');
+// Decoder failure isolates a tile, preserves other sources and global playback.
+for (const transport of ['native', 'mp4', 'hls']) {
+  const broken = video({transport}), healthy = video({buffered:5});
+  healthy.parentElement.dataset.recording = '2';
+  healthy.src = '/healthy';
+  const ctx = setup([broken, healthy]);
+  ctx.failVideo(broken);
+  assert.equal(ctx.S.playing, true);
+  assert.equal(ctx.S.currentTime, 110);
+  assert.equal(broken.parentElement.dataset.failed, '1');
+  assert.equal(broken.hidden, true);
+  assert.equal(healthy.src, '/healthy');
+  assert.equal(ctx.activeVideos().length, 1);
+  assert.equal(ctx.activeVideos()[0], healthy);
+  ctx.retryFailedRecordings();
+  assert.equal(vm.runInContext('_failedRecordings.size',ctx),0);
 }
 
 {
@@ -213,35 +216,6 @@ for (const transport of ['native', 'mp4', 'hls']) {
 }
 
 async function asyncTests() {
-  // Transient failures in every transport reload only the failed camera,
-  // keep the timeline, and stop retrying after two unsuccessful loads.
-  for (const transport of ['native', 'mp4', 'hls']) {
-    const broken = video({transport}); broken._generation = 1;
-    broken.dataset.recording = '1';
-    const retry = setup([broken]); retry.appUrl = value => value;
-    retry.fetch = async () => ({ok:true});
-    let reloads = 0;
-    retry.renderPlayers = () => { reloads++; broken._generation++; };
-    for (let attempt = 0; attempt < 2; attempt++) {
-      assert.equal(await retry.retryMediaSource(broken, 7, 4), true);
-      assert.equal(retry.S.currentTime, 110);
-    }
-    assert.equal(reloads, 2);
-    assert.equal(await retry.retryMediaSource(broken, 7, 4), false);
-    assert.equal(await retry.retryMediaSource(broken, 7, 1), false);
-  }
-  // An obsolete health response must not reload a newer user seek.
-  const obsolete = video({transport:'native'}); obsolete._generation = 1;
-  const stale = setup([obsolete]); stale.appUrl = value => value;
-  let healthReply;
-  stale.fetch = () => new Promise(resolve => { healthReply = resolve; });
-  let staleReloads = 0; stale.renderPlayers = () => { staleReloads++; };
-  const pendingRetry = stale.retryMediaSource(obsolete, 7, 2);
-  obsolete._generation++;
-  healthReply({ok:true});
-  assert.equal(await pendingRetry, true);
-  assert.equal(staleReloads, 0);
-
   // A delayed admission from an old seek cannot replace the latest video URL.
   const v = video(); v._generation = 1;
   const ctx = setup([v]); ctx.appUrl = value => value;
@@ -264,11 +238,11 @@ async function asyncTests() {
   const fresh = video(); fresh._generation = 1;
   const capacity = setup([fresh]); capacity.appUrl = value => value;
   capacity.fetch = async () => ({ok:false, json:async()=>({detail:'capacity'})});
-  capacity.failPlayback = code => { capacity.failure = code; capacity.S.playing = false; };
   await capacity.loadCompressedSource(fresh, {session_id:'new'}, '/new-video');
-  assert.equal(capacity.failure, 'capacity');
-  assert.equal(capacity.S.playing, false);
-  assert.equal(fresh.src, undefined);
+  assert.equal(fresh.parentElement.dataset.failed, '1');
+  assert.equal(vm.runInContext("_failedRecordings.get('1')",capacity), 'capacity');
+  assert.equal(capacity.S.playing, true);
+  assert.equal(fresh.src, '');
 }
 
 asyncTests().then(() => console.log('Player recovery tests passed')).catch(error => {

@@ -45,6 +45,9 @@ log = logging.getLogger("ctv")
 class VideoFileResponse(FileResponse):
     # Larger sequential reads reduce SMB and proxy overhead during multi-camera fast playback.
     chunk_size = 1024 * 1024
+    # Supervisor buffers responses smaller than 4,194,000 bytes. Keep native
+    # media ranges finite so seeking does not abandon a long proxy stream.
+    ingress_range_size = 2 * 1024 * 1024
 
     def __init__(self, path, *, expected_duration=None, release=None, **kwargs):
         self._release = release
@@ -93,21 +96,24 @@ class VideoFileResponse(FileResponse):
                 await asyncio.gather(sending, disconnect, return_exceptions=True)
 
     async def _send_file(self, scope, receive, send):
-        # A rebuilt database can reuse recording IDs. Browsers may retain a
-        # byte offset for the former file and send a now-impossible Range.
-        # Drop only an unsatisfiable starting offset so the client can reload
-        # the current file from byte zero instead of remaining stuck on 416.
         request_headers = list(scope.get("headers", []))
         range_value = next(
             (value for key, value in request_headers if key.lower() == b"range"), b""
         ).decode("latin-1")
-        range_match = re.fullmatch(r"bytes=(\d+)-(?:\d*)", range_value.strip())
-        if range_match and int(range_match.group(1)) >= self._file_size:
-            scope = dict(scope)
-            scope["headers"] = [
-                (key, value) for key, value in request_headers
-                if key.lower() not in {b"range", b"if-range"}
-            ]
+        range_match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_value.strip(), re.IGNORECASE)
+        if is_home_assistant() and scope["method"] == "GET" and range_match:
+            first, last = range_match.groups()
+            if first or last:
+                start = int(first) if first else max(0, self._file_size - int(last))
+                end = int(last) if first and last else self._file_size - 1
+                if 0 <= start < self._file_size and end >= start:
+                    end = min(end, self._file_size - 1, start + self.ingress_range_size - 1)
+                    scope = dict(scope)
+                    scope["headers"] = [
+                        (key, value) for key, value in request_headers if key.lower() != b"range"
+                    ] + [(b"range", f"bytes={start}-{end}".encode("ascii"))]
+        # Preserve If-Range, malformed/unsatisfiable ranges, HEAD and full GET
+        # semantics. RFC 9110 §15.3.7 permits a smaller, self-described 206.
         if not self._duration_patches:
             return await super().__call__(scope, receive, send)
 
@@ -119,7 +125,7 @@ class VideoFileResponse(FileResponse):
             if message["type"] == "http.response.start":
                 headers = {key.lower(): value for key, value in message.get("headers", [])}
                 content_range = headers.get(b"content-range", b"").decode("latin-1")
-                if content_range.startswith("multipart/"):
+                if headers.get(b"content-type", b"").lower().startswith(b"multipart/"):
                     patch_response = False
                 else:
                     match = re.match(r"bytes (\d+)-", content_range)
@@ -272,7 +278,8 @@ def serve_video(recording_id: int):
         prepared, release = native_cache.acquire(filepath)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         log.error('Cannot prepare native recording %s: %s', recording_id, exc)
-        raise HTTPException(status_code=503, detail='native_media_unavailable') from exc
+        raise HTTPException(status_code=503, detail='native_media_unavailable',
+                            headers={'Retry-After': '2'}) from exc
     try:
         return VideoFileResponse(prepared, media_type=media_type,
                                  expected_duration=row['duration'] if prepared == filepath else None,

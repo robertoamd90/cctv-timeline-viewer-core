@@ -1007,12 +1007,99 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ═══ SSE ═══
-const evtSource = new EventSource(appUrl('/api/events'));
-let derivedTimelineRefresh;
+// ═══ Live updates ═══
+const evtSource = new EventTarget();
+const liveEventTypes = ['recording_events', 'scan', 'partition', 'partition_progress'];
+let liveStream = null, livePollTimer = null, livePollController = null;
+let liveCursor = null, liveGeneration = 0, liveFailures = 0, liveUpdatesEnabled = false;
+
+function stopLiveUpdates() {
+  liveGeneration++;
+  clearTimeout(livePollTimer);
+  livePollTimer = null;
+  livePollController?.abort();
+  livePollController = null;
+  liveStream?.close();
+  liveStream = null;
+}
+
+async function pollLiveUpdates(generation) {
+  if (generation !== liveGeneration || document.hidden) return;
+  const controller = new AbortController();
+  livePollController = controller;
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  let delay = 2000;
+  try {
+    const firstPoll = liveCursor == null;
+    const query = liveCursor == null ? '' : `?cursor=${encodeURIComponent(liveCursor)}`;
+    const response = await fetch(appUrl(`/api/events/poll${query}`), {
+      signal: controller.signal, cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`Event updates: HTTP ${response.status}`);
+    const batch = await response.json();
+    if (generation !== liveGeneration) return;
+    liveCursor = batch.cursor;
+    liveFailures = 0;
+    if (batch.reset || (firstPoll && S.timeline)) {
+      refreshLiveState();
+    }
+    for (const event of batch.events) {
+      if (liveEventTypes.includes(event.type)) {
+        evtSource.dispatchEvent(new MessageEvent(event.type, {data: JSON.stringify(event.data)}));
+      }
+    }
+    if (batch.more) delay = 0;
+  } catch (_) {
+    if (generation !== liveGeneration) return;
+    // Back off when HA/the app is unavailable; never overlap requests.
+    liveFailures++;
+    delay = Math.min(30000, 2000 * 2 ** Math.min(liveFailures, 4));
+  } finally {
+    clearTimeout(timeout);
+    if (livePollController === controller) livePollController = null;
+    if (generation === liveGeneration && !document.hidden) {
+      livePollTimer = setTimeout(() => pollLiveUpdates(generation), delay);
+    }
+  }
+}
+
+function startLiveUpdates() {
+  stopLiveUpdates();
+  if (!liveUpdatesEnabled || document.hidden) return;
+  if (S.session.deployment === 'homeassistant') {
+    // Finite JSON batches avoid an open chunked response through Ingress.
+    return pollLiveUpdates(liveGeneration);
+  }
+  liveStream = new EventSource(appUrl('/api/events'));
+  liveStream.addEventListener('open', () => { if (S.timeline) refreshLiveState(); });
+  for (const type of liveEventTypes) {
+    liveStream.addEventListener(type, event => {
+      evtSource.dispatchEvent(new MessageEvent(type, {data: event.data}));
+    });
+  }
+}
+
+window.addEventListener('pagehide', stopLiveUpdates);
+window.addEventListener('pageshow', event => { if (event.persisted) startLiveUpdates(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopLiveUpdates();
+  else startLiveUpdates();
+});
+
+let derivedTimelineRefresh, liveCamerasNeedRefresh = false;
 function refreshDerivedTimeline() {
   clearTimeout(derivedTimelineRefresh);
-  derivedTimelineRefresh = setTimeout(() => loadTimeline(undefined, undefined, false), 150);
+  derivedTimelineRefresh = setTimeout(async () => {
+    if (liveCamerasNeedRefresh) {
+      liveCamerasNeedRefresh = false;
+      await loadCameras();
+    }
+    await loadTimeline(undefined, undefined, false);
+  }, 150);
+}
+function refreshLiveState() {
+  liveCamerasNeedRefresh = true;
+  refreshDerivedTimeline();
 }
 evtSource.addEventListener('recording_events', refreshDerivedTimeline);
 evtSource.addEventListener('scan', e => {
@@ -1020,7 +1107,7 @@ evtSource.addEventListener('scan', e => {
   const el = document.getElementById('topbar-status');
   if (d.status === 'started') el.textContent = t('cameras.scanCamera', {id: d.camera_id});
   else if (d.status === 'done') {
-    el.textContent = t('status.ready'); loadTimeline(); loadCameras();
+    el.textContent = t('status.ready'); refreshLiveState();
     toast(t('cameras.scanComplete', {new: d.new || 0, updated: d.updated || 0, missing: d.missing || 0}), 'info');
   }
   else if (d.status === 'error') { el.textContent = t('cameras.sourceUnavailable'); loadCameras(); toast(localizeMessage(d.error), 'error'); }
@@ -1040,8 +1127,7 @@ evtSource.addEventListener('partition', e => {
     if (!progress.wasFinished) S.loadingPartitions = Math.max(0, S.loadingPartitions - 1);
     status.textContent = data.status === 'error' ? t('cameras.sourceError') : t('status.ready');
     if (data.status === 'error') toast(localizeMessage(data.error), 'error');
-    loadTimeline(undefined, undefined, false);
-    loadCameras();
+    refreshLiveState();
   }
 });
 evtSource.addEventListener('partition_progress', e => {
@@ -1189,6 +1275,7 @@ document.getElementById('btn-rebuild-index').onclick = async () => {
   try {
     const result = await api('/api/admin/rebuild-index', { method: 'POST' });
     stopPlayback();
+    retryFailedRecordings();
     S.timeline = null;
     S.unfilteredTimeline = null;
     S.currentTime = null;
@@ -1303,6 +1390,7 @@ window.addEventListener('orientationchange', scheduleViewportRefresh);
 window._ctvInit = function() {
   updateGridLayout();
   loadSession()
+    .then(() => { liveUpdatesEnabled = true; return startLiveUpdates(); })
     .then(() => loadStreamProfiles())
     .then(() => loadCameras())
     .then(() => initializeTimelineDate())

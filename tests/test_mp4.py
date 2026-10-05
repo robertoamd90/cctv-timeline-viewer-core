@@ -76,7 +76,7 @@ class Mp4DurationTests(unittest.TestCase):
                 messages.append(message)
 
             async def receive():
-                return {"type": "http.disconnect"}
+                await asyncio.Event().wait()
 
             asyncio.run(response({
                 "type": "http",
@@ -92,6 +92,38 @@ class Mp4DurationTests(unittest.TestCase):
             self.assertEqual(headers["content-range"], f"bytes 10-79/{len(original)}")
             self.assertEqual(content, patch_chunk(original[10:80], 10, patches))
 
+    def test_disconnect_stops_video_body_with_and_without_duration_patches(self):
+        for duration in (None, 20.0):
+            with self.subTest(duration=duration), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'clip.mp4'
+                path.write_bytes(fragmented_mp4() + b'\0' * (3 * 1024 * 1024))
+                response = VideoFileResponse(path, media_type='video/mp4', expected_duration=duration)
+                messages = []
+
+                async def exercise():
+                    disconnected = asyncio.Event()
+
+                    async def receive():
+                        await disconnected.wait()
+                        return {'type': 'http.disconnect'}
+
+                    async def send(message):
+                        messages.append(message)
+                        if message['type'] == 'http.response.body':
+                            disconnected.set()
+                            # Simulate a blocked proxy send after its client left.
+                            await asyncio.Event().wait()
+
+                    await asyncio.wait_for(response({
+                        'type': 'http', 'method': 'GET',
+                        'headers': [(b'range', b'bytes=0-')], 'extensions': {},
+                    }, receive, send), timeout=2)
+
+                asyncio.run(exercise())
+                self.assertEqual(messages[0]['status'], 206)
+                self.assertEqual(len(messages), 2)
+                self.assertTrue(messages[-1]['more_body'])
+
     def test_video_response_recovers_from_stale_unsatisfiable_range(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "clip.mp4"
@@ -104,7 +136,7 @@ class Mp4DurationTests(unittest.TestCase):
                 messages.append(message)
 
             async def receive():
-                return {"type": "http.disconnect"}
+                await asyncio.Event().wait()
 
             asyncio.run(response({
                 "type": "http",

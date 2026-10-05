@@ -59,6 +59,22 @@ class VideoFileResponse(FileResponse):
             )
 
     async def __call__(self, scope, receive, send):
+        # FileResponse does not monitor disconnects while reading a file.
+        # Stop disk/SMB reads as soon as the proxy closes an abandoned seek.
+        async with anyio.create_task_group() as group:
+            async def watch_disconnect():
+                while True:
+                    if (await receive())["type"] == "http.disconnect":
+                        group.cancel_scope.cancel()
+                        return
+
+            group.start_soon(watch_disconnect)
+            try:
+                await self._send_file(scope, receive, send)
+            finally:
+                group.cancel_scope.cancel()
+
+    async def _send_file(self, scope, receive, send):
         # A rebuilt database can reuse recording IDs. Browsers may retain a
         # byte offset for the former file and send a now-impossible Range.
         # Drop only an unsatisfiable starting offset so the client can reload

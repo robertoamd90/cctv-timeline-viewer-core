@@ -166,6 +166,9 @@ function hasCancelledHlsSources() {
 
 function seekVideo(video) {
   if (S.currentTime == null || video.readyState < HTMLMediaElement.HAVE_METADATA) return false;
+  // Wait for the decoder to finish before issuing another Range-producing
+  // seek. Repeated alignment while seeking can cancel every pending download.
+  if (video.seeking) return false;
   const target = videoTargetTime(video);
   // Progressive transcoding is positioned through its URL start offset and
   // cannot be sought in place. Mid-stream realignment reopens that URL.
@@ -799,6 +802,10 @@ function alignVideos(videos) {
     const start = parseFloat(cell.dataset.start);
     if (!Number.isFinite(start) || S.currentTime == null) return;
     if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      aligned = false;
+      return;
+    }
+    if (video.seeking) {
       aligned = false;
       return;
     }

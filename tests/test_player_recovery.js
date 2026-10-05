@@ -45,6 +45,21 @@ function setup(videos) {
   return context;
 }
 
+// Recovery must not replace a pending native seek on every clock tick.
+{
+  const native = video({time: 0, transport: 'native'});
+  const ctx = setup([native]);
+  native.seeking = true;
+  for (let tick = 0; tick < 60; tick++) {
+    assert.equal(ctx.seekVideo(native), false);
+    assert.equal(ctx.alignVideos([native]), false);
+    assert.equal(native.currentTime, 0);
+  }
+  native.seeking = false;
+  assert.equal(ctx.seekVideo(native), true);
+  assert.equal(native.currentTime, 10);
+}
+
 // A seek in an overestimated native tail must converge, including after Pause/Play.
 {
   const native = video({time: 4, buffered: 0, transport: 'native', played: false});

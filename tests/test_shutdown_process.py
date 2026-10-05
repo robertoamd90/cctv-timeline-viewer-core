@@ -94,7 +94,7 @@ class ShutdownProcessTests(unittest.TestCase):
                             list(pool.map(read, [1,2,3]))
                         process.send_signal(signal.SIGTERM)
                         process.wait(timeout=12)
-                        self.assertIn(process.returncode, (0, -signal.SIGTERM))
+                        self.assertEqual(process.returncode, 0)
                         connection = sqlite3.connect(root / 'ctv.db', timeout=1)
                         try:
                             self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')

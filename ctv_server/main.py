@@ -149,6 +149,11 @@ class VideoFileResponse(FileResponse):
 async def lifespan(app: FastAPI):
     """Startup / shutdown events."""
     stopping.clear()
+    # AnyIO serves sync routes/file I/O; asyncio/aiofiles use a separate pool.
+    # Keep both bounded on hosts exposing many CPUs to a small app container.
+    from concurrent.futures import ThreadPoolExecutor
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 12
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=4, thread_name_prefix='ctv-io'))
     log.info("Initializing database…")
     from ctv_server.backup import restore_snapshot
     from ctv_server.db import DB_PATH
@@ -226,8 +231,16 @@ app.include_router(events.router)
 app.include_router(system.router)
 
 
+_health_limiter = anyio.CapacityLimiter(1)
+
+
 @app.get("/api/health", tags=["system"])
-def health():
+async def health():
+    # Reserve a slot so scans and native preparation cannot starve the watchdog.
+    return await anyio.to_thread.run_sync(_health_snapshot, limiter=_health_limiter)
+
+
+def _health_snapshot():
     with closing(get_db()) as conn:
         cameras = conn.execute(
             "SELECT source_status, COUNT(*) AS count FROM cameras GROUP BY source_status"

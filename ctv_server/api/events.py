@@ -60,7 +60,7 @@ def _enqueue(queue, event_type, data):
 
 
 @router.get("/poll")
-def poll_events(request: Request, cursor: str | None = Query(default=None, max_length=128)):
+async def poll_events(request: Request, cursor: str | None = Query(default=None, max_length=128)):
     """Finite responses for Ingress, with replay and explicit history gaps."""
     user = current_user(request)
     with _lock:

@@ -17,7 +17,7 @@ class EventPollTests(unittest.TestCase):
         return request
 
     def poll(self, cursor=None, admin=True):
-        response = events.poll_events(self.request(admin), cursor)
+        response = asyncio.run(events.poll_events(self.request(admin), cursor))
         self.assertEqual(int(response.headers['content-length']), len(response.body))
         self.assertLess(len(response.body), 300000)
         return json.loads(response.body)

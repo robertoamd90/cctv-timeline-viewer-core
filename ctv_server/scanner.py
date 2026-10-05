@@ -91,7 +91,7 @@ def get_ffprobe_data(filepath: str) -> dict:
         result = run_process(
             [
                 "ffprobe", "-v", "error", "-print_format", "json",
-                "-show_format", "-show_streams", filepath,
+                "-show_format", "-show_streams", "-threads", "1", filepath,
             ],
             capture_output=True, text=True, timeout=30,
         )

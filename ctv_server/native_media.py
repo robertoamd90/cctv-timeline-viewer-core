@@ -62,7 +62,7 @@ class NativeMediaCache:
                         Path(old['path']).unlink(missing_ok=True)
                         occupied -= old['size']
                         del self.entries[old_key]
-                if occupied + required <= self.limit:
+                if occupied + required <= self.limit and len(self.building) < 2:
                     if self.directory is None:
                         self.directory = tempfile.TemporaryDirectory(prefix='ctv-native-')
                     directory = self.directory.name
@@ -79,7 +79,7 @@ class NativeMediaCache:
             fd, output = tempfile.mkstemp(suffix='.mp4', dir=directory)
             os.close(fd)
             run_process(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-                         '-i', str(path), '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
+                         '-threads', '1', '-i', str(path), '-threads', '1', '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
                          '-movflags', '+faststart', '-fs', str(required), output], check=True, timeout=25)
             size = os.stat(output).st_size
             if size >= required or size == 0:

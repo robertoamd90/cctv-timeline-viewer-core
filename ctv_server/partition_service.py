@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from ctv_server.background import DerivedWorker
 from ctv_server.api.events import emit
 from ctv_server.db import get_db, sqlite_error_details, write_db
 from ctv_server.indexer import index_camera
@@ -19,6 +20,7 @@ log = logging.getLogger("ctv.partitions")
 _locks_guard = threading.Lock()
 _locks: dict[tuple[int, str], threading.Lock] = {}
 _thumbnail_worker = threading.Semaphore(1)
+_thumbnail_queue = DerivedWorker()
 
 
 def _lock_for(camera_id: int, key: str) -> threading.Lock:
@@ -234,11 +236,10 @@ def _run_partition_scan(
         payload = {"camera_id": camera_id, "partition": key, "status": "done", **result}
         emit("partition", payload)
         # Le miniature non ritardano ne la timeline ne le altre partizioni.
-        threading.Thread(
-            target=_generate_thumbnails,
-            args=(camera_id, key, job_generation),
-            daemon=True,
-        ).start()
+        _thumbnail_queue.submit(
+            (camera_id, key), _generate_thumbnails,
+            camera_id, key, job_generation,
+        )
         # Enrichment is optional: its failure must not invalidate a successful scan.
         from ctv_server.recording_events import enrich_partition
         check_running()

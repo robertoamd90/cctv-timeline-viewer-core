@@ -104,6 +104,12 @@ jobs:
           --env PYTHONPATH= cctv-viewer:ci
           -c "import ctv_server.main; print('ctv_server import: passed')"
 
+      - name: Verify playback with bounded process and thread resources
+        run: >-
+          docker run --rm --pids-limit 64 --memory 256m
+          --mount type=bind,source=${{ github.workspace }}/scripts/check_resource_pressure.py,target=/tmp/check_resource_pressure.py,readonly
+          --entrypoint python cctv-viewer:ci /tmp/check_resource_pressure.py
+
       - name: Verify container init and graceful shutdown
         run: |
           docker run -d --init --stop-timeout 30 --name ctv-shutdown cctv-viewer:ci

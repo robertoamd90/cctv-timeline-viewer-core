@@ -194,7 +194,12 @@ async def deployment_security(request, call_next):
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
     else:
         request.state.ctv_user = await user_from_request(request)
-    return await call_next(request)
+    response = await call_next(request)
+    # Revalidate application assets after app updates; immutable video URLs
+    # are handled separately. An iframe must not keep a previous beta's JS.
+    if request.url.path == '/' or request.url.path.endswith(('.html', '.js', '.css')):
+        response.headers['Cache-Control'] = 'no-cache'
+    return response
 
 cors_origins = [value.strip() for value in os.environ.get("CTV_CORS_ORIGINS", "").split(",") if value.strip()]
 if cors_origins:

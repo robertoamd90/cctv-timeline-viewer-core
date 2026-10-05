@@ -213,6 +213,35 @@ for (const transport of ['native', 'mp4', 'hls']) {
 }
 
 async function asyncTests() {
+  // Transient failures in every transport reload only the failed camera,
+  // keep the timeline, and stop retrying after two unsuccessful loads.
+  for (const transport of ['native', 'mp4', 'hls']) {
+    const broken = video({transport}); broken._generation = 1;
+    broken.dataset.recording = '1';
+    const retry = setup([broken]); retry.appUrl = value => value;
+    retry.fetch = async () => ({ok:true});
+    let reloads = 0;
+    retry.renderPlayers = () => { reloads++; broken._generation++; };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      assert.equal(await retry.retryMediaSource(broken, 7, 4), true);
+      assert.equal(retry.S.currentTime, 110);
+    }
+    assert.equal(reloads, 2);
+    assert.equal(await retry.retryMediaSource(broken, 7, 4), false);
+    assert.equal(await retry.retryMediaSource(broken, 7, 1), false);
+  }
+  // An obsolete health response must not reload a newer user seek.
+  const obsolete = video({transport:'native'}); obsolete._generation = 1;
+  const stale = setup([obsolete]); stale.appUrl = value => value;
+  let healthReply;
+  stale.fetch = () => new Promise(resolve => { healthReply = resolve; });
+  let staleReloads = 0; stale.renderPlayers = () => { staleReloads++; };
+  const pendingRetry = stale.retryMediaSource(obsolete, 7, 2);
+  obsolete._generation++;
+  healthReply({ok:true});
+  assert.equal(await pendingRetry, true);
+  assert.equal(staleReloads, 0);
+
   // A delayed admission from an old seek cannot replace the latest video URL.
   const v = video(); v._generation = 1;
   const ctx = setup([v]); ctx.appUrl = value => value;

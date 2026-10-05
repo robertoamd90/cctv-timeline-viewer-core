@@ -107,9 +107,46 @@ function resetPlaybackRecovery() {
   finishRecovery();
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
-    video.dataset.networkRetry = '0';
+    video._mediaRetries = {};
   });
   document.getElementById('playback-notice').hidden = true;
+}
+
+// A failed HTTP/decoder load can be transient even when the recording is valid.
+// Retry only the affected source, and bound attempts per recording/transport.
+async function retryMediaSource(video, cameraId, errorCode) {
+  if (![2, 3, 4].includes(errorCode)) return false;
+  const generation = video._generation;
+  if (video._recoveringGeneration === generation) return true;
+  const key = `${video.dataset.recording}:${video.parentElement.dataset.streamTransport}`;
+  const attempts = video._mediaRetries || (video._mediaRetries = {});
+  if ((attempts[key] || 0) >= 2) return false;
+  attempts[key] = (attempts[key] || 0) + 1;
+  video._recoveringGeneration = generation;
+  const epoch = _playbackEpoch;
+  enterBufferingBarrier(video, t('player.buffering'));
+  try {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      let reachable = false;
+      try { reachable = (await fetch(appUrl('/api/health'), {signal: controller.signal})).ok; }
+      catch (_) { /* Allow a restarting service to return. */ }
+      finally { clearTimeout(timer); }
+      if (generation !== video._generation || epoch !== _playbackEpoch) return true;
+      if (reachable) {
+        playbackDiagnostics.recoveries++;
+        _playerCache[cameraId] = null;
+        renderPlayers();
+        if (S.playing) enterBufferingBarrier(null, null);
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    return false;
+  } finally {
+    if (video._recoveringGeneration === generation) video._recoveringGeneration = null;
+  }
 }
 
 function finishRecovery() {
@@ -280,7 +317,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
 
   if (rec) {
     const recId = String(rec.id);
-    if (v.dataset.recording !== recId) v.dataset.networkRetry = '0';
+    if (v.dataset.recording !== recId) v._mediaRetries = {};
     const originalDuration = rec.duration ??
       Math.max(0, (rec.end_ts ?? rec.start_ts) - rec.start_ts);
     const profile = effectiveStreamProfile(rec);
@@ -393,27 +430,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
       const mediaError = v.error;
       console.error('CTV media failure', {recording: recId, transport: cell.dataset.streamTransport,
         code: mediaError?.code, message: mediaError?.message, source: v.currentSrc || v.src});
-      if (cell.dataset.streamTransport === 'native' && mediaError?.code === 2 &&
-          v.dataset.networkRetry !== '1') {
-        v.dataset.networkRetry = '1';
-        enterBufferingBarrier(v, t('player.buffering'));
-        for (let attempt = 0; attempt < 6; attempt++) {
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 1500);
-          let reachable = false;
-          try { reachable = (await fetch(appUrl('/api/health'), {signal: controller.signal})).ok; }
-          catch (_) { /* A restarting service is temporarily unreachable. */ }
-          finally { clearTimeout(timeout); }
-          if (v._generation !== generation) return;
-          if (reachable) {
-            _playerCache[cid] = null;
-            renderPlayers();
-            if (S.playing) enterBufferingBarrier(null, null);
-            return;
-          }
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        }
-      }
+      if (await retryMediaSource(v, cid, mediaError?.code)) return;
+      if (v._generation !== generation) return;
       // Native codec/decoder failures get one compatible H.264 attempt for
       // this recording. Preserve the selected timeline position and quality
       // of the other cameras; do not loop through the same rejected source.
@@ -430,8 +448,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
       if (v._generation !== generation) return;
       clearFreezeFrame(v);
       cell.dataset.failed = '1'; cell.dataset.buffering = '0';
-      setPlayerStatus(cell, t('player.unplayable'), true);
-      failPlayback(status.reason || 'unplayable');
+      setPlayerStatus(cell, t('player.recoveryFailed'), true);
+      failPlayback(status.reason || 'recoveryFailed');
     };
     // This is a per-browser preference because preload behavior varies by
     // engine and connection. Browsers may still treat it as a hint.
@@ -462,7 +480,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
     } else {
       cell.dataset.streamTransport = 'native';
       cell.dataset.hlsCancelled = '0';
-      v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}`);
+      const retries = v._mediaRetries?.[`${recId}:native`] || 0;
+      v.src = appUrl(`/video/${rec.id}?v=${_nativeMediaCacheToken}&retry=${retries}`);
     }
     if (!plan.transcoded) v.load();
     const generation = v._generation;

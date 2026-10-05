@@ -15,6 +15,7 @@ from ctv_server.models import PlaybackRequest
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 from fastapi.middleware.cors import CORSMiddleware
 from ctv_server.db import close_db, init_db, get_db, sqlite_error_details
 from ctv_server.api import cameras, recordings, scan, timeline, search, events, system
@@ -79,21 +80,102 @@ class VideoFileResponse(FileResponse):
                 if (await receive())["type"] == "http.disconnect":
                     return
 
-        sending = asyncio.create_task(self._send_file(scope, receive, send))
+        sending_scope = None
+        cancel_requested = False
+
+        async def stream():
+            nonlocal sending_scope
+            # Task.cancel() bypasses AnyIO's worker shield: an SMB read keeps
+            # running while its capacity token is released. Repeated abandoned
+            # seeks then create unbounded workers despite the configured limit.
+            with anyio.CancelScope(shield=True):
+                with anyio.CancelScope() as cancel_scope:
+                    sending_scope = cancel_scope
+                    if cancel_requested:
+                        cancel_scope.cancel()
+                    await self._send_file(scope, receive, send)
+
+        sending = asyncio.create_task(stream())
         disconnect = asyncio.create_task(watch_disconnect())
         try:
             done, _ = await asyncio.wait((sending, disconnect), return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 await task
         finally:
-            # Edge-triggered cancellation lets FileResponse close its file.
-            # An AnyIO cancelled scope also cancelled every cleanup await,
-            # leaking descriptors on abandoned video requests.
-            for task in (sending, disconnect):
-                if not task.done():
-                    task.cancel()
+            cancel_requested = True
+            if sending_scope is not None:
+                sending_scope.cancel()
+            if not disconnect.done():
+                disconnect.cancel()
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(sending, disconnect, return_exceptions=True)
+
+    @asynccontextmanager
+    async def _open_video(self):
+        file = await anyio.open_file(self.path, mode='rb')
+        try:
+            yield file
+        finally:
+            # Close after the outstanding read returns, even when the delivery
+            # scope has been cancelled. Never close a file concurrently with read.
+            with anyio.CancelScope(shield=True):
+                await file.aclose()
+
+    async def _handle_simple(self, send, send_header_only, send_pathsend):
+        await send({'type': 'http.response.start', 'status': self.status_code, 'headers': self.raw_headers})
+        if send_header_only:
+            await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+        elif send_pathsend:
+            await send({'type': 'http.response.pathsend', 'path': str(self.path)})
+        else:
+            async with self._open_video() as file:
+                while True:
+                    chunk = await file.read(self.chunk_size)
+                    more = len(chunk) == self.chunk_size
+                    await send({'type': 'http.response.body', 'body': chunk, 'more_body': more})
+                    if not more:
+                        break
+
+    async def _handle_single_range(self, send, start, end, file_size, send_header_only):
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers['content-range'] = f'bytes {start}-{end - 1}/{file_size}'
+        headers['content-length'] = str(end - start)
+        await send({'type': 'http.response.start', 'status': 206, 'headers': headers.raw})
+        if send_header_only:
+            await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+        else:
+            async with self._open_video() as file:
+                await file.seek(start)
+                while start < end:
+                    chunk = await file.read(min(self.chunk_size, end - start))
+                    if not chunk:
+                        raise OSError('Recording ended before the requested byte range')
+                    start += len(chunk)
+                    await send({'type': 'http.response.body', 'body': chunk, 'more_body': start < end})
+
+    async def _handle_multiple_ranges(self, send, ranges, file_size, send_header_only):
+        from secrets import token_hex
+        boundary = token_hex(13)
+        length, header = self.generate_multipart(ranges, boundary, file_size, self.headers['content-type'])
+        headers = MutableHeaders(raw=list(self.raw_headers))
+        headers['content-type'] = f'multipart/byteranges; boundary={boundary}'
+        headers['content-length'] = str(length)
+        await send({'type': 'http.response.start', 'status': 206, 'headers': headers.raw})
+        if send_header_only:
+            await send({'type': 'http.response.body', 'body': b'', 'more_body': False})
+        else:
+            async with self._open_video() as file:
+                for start, end in ranges:
+                    await send({'type': 'http.response.body', 'body': header(start, end), 'more_body': True})
+                    await file.seek(start)
+                    while start < end:
+                        chunk = await file.read(min(self.chunk_size, end - start))
+                        if not chunk:
+                            raise OSError('Recording ended before the requested byte range')
+                        start += len(chunk)
+                        await send({'type': 'http.response.body', 'body': chunk, 'more_body': True})
+                    await send({'type': 'http.response.body', 'body': b'\r\n', 'more_body': True})
+                await send({'type': 'http.response.body', 'body': f'--{boundary}--'.encode(), 'more_body': False})
 
     async def _send_file(self, scope, receive, send):
         request_headers = list(scope.get("headers", []))

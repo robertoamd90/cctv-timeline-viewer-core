@@ -184,6 +184,39 @@ class Mp4DurationTests(unittest.TestCase):
                 self.assertEqual(content, original[expected_start:expected_end+1])
                 self.assertEqual(int(headers[b'content-length']), len(content))
 
+    def test_custom_delivery_preserves_head_if_range_and_multipart(self):
+        original = bytes(range(256)) * 32
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'clip.mp4'
+            path.write_bytes(original)
+            def request(method='GET', headers=()):
+                messages = []
+                async def send(message):
+                    messages.append(message)
+                async def receive():
+                    await asyncio.Event().wait()
+                asyncio.run(VideoFileResponse(path)({'type':'http', 'method':method,
+                    'headers':list(headers), 'extensions':{}}, receive, send))
+                return messages[0]['status'], dict(messages[0]['headers']), b''.join(item.get('body',b'') for item in messages[1:])
+            status, headers, body = request()
+            self.assertEqual((status,body), (200,original))
+            etag = headers[b'etag']
+            status, headers, body = request('HEAD', [(b'range', b'bytes=50-99')])
+            self.assertEqual((status,body), (206,b''))
+            self.assertEqual(headers[b'content-length'], b'50')
+            status, headers, body = request(headers=[(b'range',b'bytes=50-99'),(b'if-range',etag)])
+            self.assertEqual((status,body), (206,original[50:100]))
+            status, headers, body = request(headers=[(b'range',b'bytes=50-99'),(b'if-range',b'"stale"')])
+            self.assertEqual((status,body), (200,original))
+            status, headers, body = request(headers=[(b'range',b'bytes=50-99,200-299')])
+            self.assertEqual(status,206)
+            self.assertTrue(headers[b'content-type'].startswith(b'multipart/byteranges'))
+            self.assertEqual(int(headers[b'content-length']),len(body))
+            self.assertIn(b'Content-Range: bytes 50-99/8192',body)
+            self.assertIn(b'Content-Range: bytes 200-299/8192',body)
+            self.assertIn(original[50:100],body)
+            self.assertIn(original[200:300],body)
+
 
 if __name__ == "__main__":
     unittest.main()

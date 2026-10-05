@@ -110,6 +110,12 @@ jobs:
           --mount type=bind,source=${{ github.workspace }}/scripts/check_resource_pressure.py,target=/tmp/check_resource_pressure.py,readonly
           --entrypoint python cctv-viewer:ci /tmp/check_resource_pressure.py
 
+      - name: Verify slow-read cancellation under process limit
+        run: >-
+          docker run --rm --pids-limit 32 --memory 256m
+          --mount type=bind,source=${{ github.workspace }}/tests/test_video_cancellation.py,target=/tmp/test_video_cancellation.py,readonly
+          --entrypoint python cctv-viewer:ci /tmp/test_video_cancellation.py
+
       - name: Verify container init and graceful shutdown
         run: |
           docker run -d --init --stop-timeout 30 --name ctv-shutdown cctv-viewer:ci

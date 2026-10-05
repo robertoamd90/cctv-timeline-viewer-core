@@ -73,9 +73,16 @@ class ShutdownTests(unittest.TestCase):
                 stopping.set()
                 worker.join(5)
 
-    def test_manifest_preserves_cold_backup_and_enables_init(self):
+    def test_manifest_uses_online_snapshot_and_enables_init(self):
         import json
         config = json.loads((Path(__file__).resolve().parents[1] / 'packaging/homeassistant/config.base.json').read_text())
         self.assertTrue(config['init'])
-        self.assertEqual(config['backup'], 'cold')
+        self.assertEqual(config['backup'], 'hot')
+        self.assertEqual(config['backup_pre'], 'python -m ctv_server.backup')
+        self.assertIn('**/.ctv-live', config['backup_exclude'])
+        # Supervisor matches the host data path, not the container /data path.
+        host_marker = Path('/data/apps/data/example_ctv/.ctv-live')
+        self.assertTrue(any(host_marker.match(pattern) for pattern in config['backup_exclude']))
+        self.assertNotIn('/data/ctv.db', config['backup_exclude'])
+        self.assertNotIn('/data/ctv.db.backup', config['backup_exclude'])
         self.assertGreaterEqual(config['timeout'], 30)

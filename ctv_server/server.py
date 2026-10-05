@@ -1,5 +1,6 @@
 """Signal-aware production entrypoint: stop producers before draining HTTP."""
 import signal
+import logging
 import uvicorn
 
 from ctv_server.lifecycle import stopping
@@ -7,6 +8,7 @@ from ctv_server.lifecycle import stopping
 
 class Server(uvicorn.Server):
     def handle_exit(self, sig, frame):
+        logging.getLogger('ctv').info('Shutdown requested by signal %s', signal.Signals(sig).name)
         stopping.set()
         super().handle_exit(sig, frame)
         # Uvicorn replays captured signals after graceful shutdown. Supervisor

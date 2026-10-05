@@ -14,11 +14,23 @@ window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
   firstFrames: playbackDiagnostics.firstFrames.slice(),
   bufferingMs: playbackDiagnostics.bufferingMs + (_recoveryStarted == null ? 0 : performance.now() - _recoveryStarted)});
 const _nativeMediaCacheToken = Date.now().toString(36);
+const _nativeFallbacks = new Set();
+
+function effectiveStreamProfile(rec) {
+  return S.streamProfile === 'native' && rec && _nativeFallbacks.has(String(rec.id))
+    ? 'balanced' : S.streamProfile;
+}
+
+function hasCompressedPlayback() {
+  return S.streamProfile !== 'native' || getVideos().some(video =>
+    ['mp4', 'hls'].includes(video.parentElement.dataset.streamTransport));
+}
 
 function playerSourceKey(rec) {
   if (!rec) return '';
-  const plan = CtvMedia.playbackPlan(S.streamProfile, S.speed);
-  return `${rec.id}:${S.streamProfile}:${plan.streamSpeed}:${S.streamProfileRevision}`;
+  const profile = effectiveStreamProfile(rec);
+  const plan = CtvMedia.playbackPlan(profile, S.speed);
+  return `${rec.id}:${profile}:${plan.streamSpeed}:${S.streamProfileRevision}`;
 }
 
 function videoPlaybackRate(video) {
@@ -93,7 +105,10 @@ async function releasePlaybackSession(jobId) {
 function resetPlaybackRecovery() {
   _playbackEpoch++;
   finishRecovery();
-  getVideos().forEach(video => { video.dataset.recoveryAttempts = '0'; });
+  getVideos().forEach(video => {
+    video.dataset.recoveryAttempts = '0';
+    video.dataset.networkRetry = '0';
+  });
   document.getElementById('playback-notice').hidden = true;
 }
 
@@ -265,9 +280,11 @@ function updatePlayerCell(cell, cam, rec, cid) {
 
   if (rec) {
     const recId = String(rec.id);
+    if (v.dataset.recording !== recId) v.dataset.networkRetry = '0';
     const originalDuration = rec.duration ??
       Math.max(0, (rec.end_ts ?? rec.start_ts) - rec.start_ts);
-    const plan = CtvMedia.playbackPlan(S.streamProfile, S.speed);
+    const profile = effectiveStreamProfile(rec);
+    const plan = CtvMedia.playbackPlan(profile, S.speed);
     const maxOffset = Math.max(0, originalDuration - 0.05);
     const streamOffset = plan.transcoded
       ? Math.min(maxOffset, Math.max(0, (S.currentTime ?? rec.start_ts) - rec.start_ts))
@@ -282,7 +299,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     cell.dataset.streamSpeed = String(plan.streamSpeed);
     cell.dataset.playbackRate = String(plan.playbackRate);
     cell.dataset.duration = String(streamDuration);
-    cell.dataset.profile = S.streamProfile;
+    cell.dataset.profile = profile;
     cell.dataset.streamTransport = '';
     cell.dataset.transitioning = '';
     cell.dataset.buffering = '1';
@@ -373,6 +390,40 @@ function updatePlayerCell(cell, cam, rec, cid) {
     };
     v.onerror = async () => {
       const generation = v._generation;
+      const mediaError = v.error;
+      console.error('CTV media failure', {recording: recId, transport: cell.dataset.streamTransport,
+        code: mediaError?.code, message: mediaError?.message, source: v.currentSrc || v.src});
+      if (cell.dataset.streamTransport === 'native' && mediaError?.code === 2 &&
+          v.dataset.networkRetry !== '1') {
+        v.dataset.networkRetry = '1';
+        enterBufferingBarrier(v, t('player.buffering'));
+        for (let attempt = 0; attempt < 6; attempt++) {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 1500);
+          let reachable = false;
+          try { reachable = (await fetch(appUrl('/api/health'), {signal: controller.signal})).ok; }
+          catch (_) { /* A restarting service is temporarily unreachable. */ }
+          finally { clearTimeout(timeout); }
+          if (v._generation !== generation) return;
+          if (reachable) {
+            _playerCache[cid] = null;
+            renderPlayers();
+            if (S.playing) enterBufferingBarrier(null, null);
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      // Native codec/decoder failures get one compatible H.264 attempt for
+      // this recording. Preserve the selected timeline position and quality
+      // of the other cameras; do not loop through the same rejected source.
+      if (cell.dataset.streamTransport === 'native' &&
+          (mediaError?.code === 3 || mediaError?.code === 4) && !_nativeFallbacks.has(recId)) {
+        _nativeFallbacks.add(recId);
+        renderPlayers();
+        if (S.playing) enterBufferingBarrier(null, null);
+        return;
+      }
       const jobId = cell.dataset.transcodeJob;
       const status = jobId ? await fetch(appUrl(`/api/playback-sessions/${jobId}`))
         .then(response => response.json()).catch(() => ({})) : {};
@@ -390,7 +441,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
       cell.dataset.transcodeJob = jobId;
       cell.dataset.hlsCancelled = '0';
       const query = new URLSearchParams({
-        profile: S.streamProfile,
+        profile,
         start: streamOffset.toFixed(3),
         speed: String(plan.streamSpeed),
       });
@@ -406,7 +457,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
         query.set('session_id', jobId);
         cell.dataset.pendingUrl = appUrl(`/stream/${rec.id}?${query}`);
       }
-      loadCompressedSource(v, {session_id: jobId, recording_id: rec.id, profile: S.streamProfile,
+      loadCompressedSource(v, {session_id: jobId, recording_id: rec.id, profile,
         start: Number(streamOffset.toFixed(3)), speed: plan.streamSpeed, transport: cell.dataset.streamTransport}, cell.dataset.pendingUrl);
     } else {
       cell.dataset.streamTransport = 'native';
@@ -525,12 +576,13 @@ function findRecordingAt(cameraId, ts) {
   const cam = S.timeline.cameras.find(c => c.camera_id === cameraId);
   if (!cam) return null;
   const recording = CtvMedia.recordingAt(cam.segments, ts);
-  if (!recording || S.streamProfile === 'native' || recording.end_ts == null) {
+  const profile = effectiveStreamProfile(recording);
+  if (!recording || profile === 'native' || recording.end_ts == null) {
     return recording;
   }
-  const plan = CtvMedia.playbackPlan(S.streamProfile, S.speed);
-  const configuredFps = Number(S.streamProfiles?.[S.streamProfile]?.fps);
-  const fallbackFps = S.streamProfile === 'balanced' ? 15 : 8;
+  const plan = CtvMedia.playbackPlan(profile, S.speed);
+  const configuredFps = Number(S.streamProfiles?.[profile]?.fps);
+  const fallbackFps = profile === 'balanced' ? 15 : 8;
   return CtvMedia.transcodedTailHasFrame(
     recording.end_ts - ts,
     plan.streamSpeed,
@@ -565,7 +617,7 @@ function updateAutoHotspot(previousTime, currentTime) {
 // ── Seek ──
 function seekPlayersToTime() {
   resetPlaybackRecovery();
-  if (S.streamProfile !== 'native') {
+  if (hasCompressedPlayback()) {
     renderPlayers(true);
     return;
   }
@@ -590,7 +642,7 @@ function seekPlayersToTime() {
 
 function seekCurrentTime() {
   if (S.currentTime != null) {
-    renderPlayers(S.streamProfile !== 'native');
+    renderPlayers(hasCompressedPlayback());
     updateCursor();
     updateTimeDisplay();
   }
@@ -892,7 +944,7 @@ function applyPlaybackSpeed(value) {
   S.speed = speed;
   _clockStartTime = S.currentTime;
   _clockStartWall = performance.now();
-  if (S.streamProfile === 'native') {
+  if (!hasCompressedPlayback()) {
     getVideos().forEach(video => {
       video.parentElement.dataset.playbackRate = String(S.speed);
       video.playbackRate = S.speed;

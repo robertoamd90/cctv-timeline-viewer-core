@@ -42,7 +42,7 @@ credentials. All Home Assistant users can open the app, browse the timeline and 
 Only administrators see Cameras and can change configuration or request manual scans.
 
 The published add-on supports `amd64` and `aarch64`. Its SQLite index is stored
-under `/data` and included in cold backups. Generated thumbnails are excluded
+under `/data` and included in online backups. Generated thumbnails are excluded
 from backups because they can be rebuilt.
 
 ## Standalone
@@ -425,11 +425,12 @@ Copyright (C) 2026 robertoamd90.
 
 Licensed under the GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
 
-### Backup interruptions and shutdown
+### Online backups and shutdown
 
-Home Assistant currently uses **cold backups** for CCTV Viewer: the Supervisor
-stops the app for the backup and starts it again afterwards. Playback is
-interrupted, so frequent backups also interrupt long viewing sessions.
+Home Assistant uses hot backups with a consistent SQLite snapshot created by
+the pre-backup hook. Playback continues during backups. Restored archives use
+the snapshot automatically; backups taken while the app is stopped preserve
+the live database. See the Home Assistant app documentation for restore details.
 The app uses the container init process, stops accepting new scans when shutdown
 begins, cancels probe/thumbnail work and closes its database connections. The
 Supervisor allows 30 seconds for shutdown. Interrupted scans are recovered at
@@ -437,4 +438,4 @@ startup; recordings are not duplicated or deleted by this recovery.
 
 A `database_busy` response indicates temporary SQLite lock contention, not proof
 of database corruption. If it persists, inspect both app and Supervisor logs;
-changing backup mode to hot without a consistent SQLite snapshot is unsupported.
+the online snapshot hook must complete successfully for a valid app backup.

@@ -47,6 +47,21 @@ function setup(videos) {
 
 // Recovery must not replace a pending native seek on every clock tick.
 {
+  const native = video({transport: 'native'});
+  const ctx = setup([native]);
+  ctx.S.streamProfile = 'native';
+  ctx.getVideos = () => [native];
+  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'native');
+  vm.runInContext("_nativeFallbacks.add('1')", ctx);
+  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'balanced');
+  assert.equal(ctx.effectiveStreamProfile({id: 2}), 'native');
+  native.parentElement.dataset.streamTransport = 'mp4';
+  assert.equal(ctx.hasCompressedPlayback(), true);
+  ctx.S.streamProfile = 'fast';
+  assert.equal(ctx.effectiveStreamProfile({id: 1}), 'fast');
+}
+
+{
   const native = video({time: 0, transport: 'native'});
   const ctx = setup([native]);
   native.seeking = true;

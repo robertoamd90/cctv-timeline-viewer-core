@@ -41,9 +41,13 @@
     "CTV_HLS_ACTIVE_IDLE_TIMEOUT": "30"
   },
   "watchdog": "http://[HOST]:[PORT:8000]/api/health",
-  "backup": "cold",
+  "backup": "hot",
+  "backup_pre": "python -m ctv_server.backup",
+  "backup_post": "python -m ctv_server.backup cleanup",
   "timeout": 30,
   "backup_exclude": [
-    "/data/thumbnails/**"
+    "**/thumbnails/**",
+    "**/.ctv-live",
+    "**/.ctv-backup-*"
   ]
 }

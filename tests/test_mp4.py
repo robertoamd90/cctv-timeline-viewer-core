@@ -97,7 +97,9 @@ class Mp4DurationTests(unittest.TestCase):
             with self.subTest(duration=duration), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / 'clip.mp4'
                 path.write_bytes(fragmented_mp4() + b'\0' * (3 * 1024 * 1024))
-                response = VideoFileResponse(path, media_type='video/mp4', expected_duration=duration)
+                released = []
+                response = VideoFileResponse(path, media_type='video/mp4', expected_duration=duration,
+                                             release=lambda: released.append(True))
                 messages = []
 
                 async def exercise():
@@ -123,6 +125,7 @@ class Mp4DurationTests(unittest.TestCase):
                 self.assertEqual(messages[0]['status'], 206)
                 self.assertEqual(len(messages), 2)
                 self.assertTrue(messages[-1]['more_body'])
+                self.assertEqual(released, [True])
 
     def test_video_response_recovers_from_stale_unsatisfiable_range(self):
         with tempfile.TemporaryDirectory() as directory:

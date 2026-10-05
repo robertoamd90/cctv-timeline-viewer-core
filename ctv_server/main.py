@@ -3,6 +3,7 @@ import asyncio
 import logging
 import mimetypes
 import sqlite3
+import subprocess
 import re
 import time
 from contextlib import asynccontextmanager, closing
@@ -20,6 +21,7 @@ from ctv_server.api import cameras, recordings, scan, timeline, search, events, 
 from ctv_server.auth import user_from_request
 from ctv_server.config import is_home_assistant, trusted_ingress_proxies
 from ctv_server.mp4 import file_duration_patches, patch_chunk
+from ctv_server.native_media import native_cache
 from ctv_server.streaming import (
     cancel_hls_job,
     ensure_hls_playlist,
@@ -44,7 +46,8 @@ class VideoFileResponse(FileResponse):
     # Larger sequential reads reduce SMB and proxy overhead during multi-camera fast playback.
     chunk_size = 1024 * 1024
 
-    def __init__(self, path, *, expected_duration=None, **kwargs):
+    def __init__(self, path, *, expected_duration=None, release=None, **kwargs):
+        self._release = release
         stat_result = kwargs.get("stat_result") or os.stat(path)
         kwargs["stat_result"] = stat_result
         headers = dict(kwargs.pop("headers", {}) or {})
@@ -59,20 +62,35 @@ class VideoFileResponse(FileResponse):
             )
 
     async def __call__(self, scope, receive, send):
+        try:
+            await self._stream_file(scope, receive, send)
+        finally:
+            if self._release:
+                self._release()
+
+    async def _stream_file(self, scope, receive, send):
         # FileResponse does not monitor disconnects while reading a file.
         # Stop disk/SMB reads as soon as the proxy closes an abandoned seek.
-        async with anyio.create_task_group() as group:
-            async def watch_disconnect():
-                while True:
-                    if (await receive())["type"] == "http.disconnect":
-                        group.cancel_scope.cancel()
-                        return
+        async def watch_disconnect():
+            while True:
+                if (await receive())["type"] == "http.disconnect":
+                    return
 
-            group.start_soon(watch_disconnect)
-            try:
-                await self._send_file(scope, receive, send)
-            finally:
-                group.cancel_scope.cancel()
+        sending = asyncio.create_task(self._send_file(scope, receive, send))
+        disconnect = asyncio.create_task(watch_disconnect())
+        try:
+            done, _ = await asyncio.wait((sending, disconnect), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
+        finally:
+            # Edge-triggered cancellation lets FileResponse close its file.
+            # An AnyIO cancelled scope also cancelled every cleanup await,
+            # leaking descriptors on abandoned video requests.
+            for task in (sending, disconnect):
+                if not task.done():
+                    task.cancel()
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(sending, disconnect, return_exceptions=True)
 
     async def _send_file(self, scope, receive, send):
         # A rebuilt database can reuse recording IDs. Browsers may retain a
@@ -126,6 +144,10 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown events."""
     stopping.clear()
     log.info("Initializing database…")
+    from ctv_server.backup import restore_snapshot
+    from ctv_server.db import DB_PATH
+    if restore_snapshot(DB_PATH):
+        log.info("Restored database from online backup snapshot")
     init_db()
     from ctv_server.autoscan import recover_interrupted_scans
     recover_interrupted_scans()
@@ -241,7 +263,18 @@ def serve_video(recording_id: int):
         raise HTTPException(status_code=404, detail="File not found on disk")
     # FileResponse gestisce nativamente i range request (Content-Range)
     media_type = mimetypes.guess_type(filepath)[0] or "application/octet-stream"
-    return VideoFileResponse(filepath, media_type=media_type, expected_duration=row["duration"])
+    try:
+        prepared, release = native_cache.acquire(filepath)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        log.error('Cannot prepare native recording %s: %s', recording_id, exc)
+        raise HTTPException(status_code=503, detail='native_media_unavailable') from exc
+    try:
+        return VideoFileResponse(prepared, media_type=media_type,
+                                 expected_duration=row['duration'] if prepared == filepath else None,
+                                 release=release)
+    except BaseException:
+        release()
+        raise
 
 
 @app.exception_handler(sqlite3.OperationalError)

@@ -67,7 +67,12 @@ jobs:
           assert app["ingress"] is True and app["ingress_stream"] is True
           assert app["init"] is True and beta["init"] is True
           assert app["timeout"] == 30 and beta["timeout"] == 30
-          assert app["backup"] == "cold" and beta["backup"] == "cold"
+          assert app["backup"] == "hot" and beta["backup"] == "hot"
+          assert app["backup_pre"] == beta["backup_pre"] == "python -m ctv_server.backup"
+          assert app["backup_post"] == "python -m ctv_server.backup cleanup"
+          assert "**/.ctv-live" in app["backup_exclude"]
+          assert "/data/ctv.db" not in app["backup_exclude"]
+          assert "/data/ctv.db.backup" not in app["backup_exclude"]
           assert app["panel_admin"] is False
           assert beta["panel_admin"] is False
           assert str(app["environment"]["CTV_HA_ADMIN_ONLY"]) == "0"
@@ -110,6 +115,9 @@ jobs:
             sleep 1
           done
           docker exec ctv-shutdown python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=2)"
+          docker exec ctv-shutdown python -m ctv_server.backup
+          docker exec ctv-shutdown python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=2)"
+          docker exec ctv-shutdown python -m ctv_server.backup cleanup
           docker stop ctv-shutdown
           code=$(docker inspect --format '{{.State.ExitCode}}' ctv-shutdown)
           test "$code" = 0

@@ -45,7 +45,7 @@ The published add-on supports `amd64` and `aarch64`. Its SQLite index is stored
 under `/data` and included in online backups. Generated thumbnails are excluded
 from backups because they can be rebuilt.
 
-## Standalone
+## Standalone Python
 
 ### Requirements
 
@@ -63,8 +63,60 @@ python -m uvicorn ctv_server.main:app --host 0.0.0.0 --port 8000
 
 Open `http://localhost:8000`. Use `--reload` only during development.
 
-Standalone mode has no built-in authentication. Use it on a trusted network or
+Python standalone mode has no built-in authentication. Use it on a trusted network or
 behind an authenticated reverse proxy.
+
+## Standalone PHP version
+
+This repository also includes `ctv_php/`, a PHP 8.2+/SQLite backend for an Apache or
+LiteSpeed hosting account where Python and FFmpeg/FFprobe cannot be installed.
+It reuses the same
+`ctv_web` timeline/player UI, serves H.264 MP4 recordings natively with HTTP
+Range support, reads MP4 duration in pure PHP (including Reolink fragmented
+MP4s), and reuses nearby JPEG snapshots as thumbnails.
+
+The PHP version includes required HTTP Basic Authentication backed by a bcrypt
+`.htpasswd` file outside the document root. The viewer, API, thumbnails and
+direct video URLs all require a password; an installation without a valid
+password file refuses access. Use HTTPS.
+
+It needs 64-bit PHP 8.2+ with `pdo_sqlite`, a writable data directory and read
+access to the recordings. It uses native browser playback and supports cron
+indexing, camera management, timeline browsing and search. Server-side
+transcoding, Home Assistant events and background live updates are unavailable;
+H.265/HEVC playback depends on the browser and operating system.
+
+Deploy the **complete repository**, set the document root to `ctv_php/public`,
+and run the interactive setup script from the repository root:
+
+```bash
+php ctv_php/setup.php
+```
+
+For SSH deployments from a local checkout, create `.env.prod.local` in the
+repository root with `REMOTE_HOST`, `REMOTE_USER` and `REMOTE_DIR`, then run:
+
+```bash
+ctv_php/deploy.sh
+```
+
+The script transfers `ctv_php` and `ctv_web`, preserves the server's private
+configuration and data, offers to rerun the interactive setup when configured,
+then discovers cameras and indexes recordings. See the PHP guide for optional
+deployment settings and indexing details.
+
+The wizard checks PHP/SQLite, collects the archive paths and all PHP settings,
+creates a password-protected login (example username: `alex`), and optionally
+discovers camera folders. With no SSH access, open `https://YOUR-DOMAIN/YOUR-PATH/setup.php`
+and unlock the browser wizard using the private token in `ctv_php/.setup-token`,
+read through the hosting file manager. Browser setup closes once configured.
+Run `php ctv_php/bin/index.php --all` to index the complete existing archive,
+including historical dates. Use `--days=2` for subsequent incremental cron scans.
+The existing Docker image still runs the Python version.
+
+See the separate [PHP installation and deployment guide](ctv_php/README.md)
+for password setup, configuration, initial indexing, cron, upgrades and
+troubleshooting.
 
 ## Docker
 

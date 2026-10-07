@@ -7,7 +7,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-.env
+.env*
+.idea/
 .venv/
 venv/
 *.log
@@ -27,3 +28,12 @@ Thumbs.db
 
 # Local design notes and review results.
 /docs/proposals/
+
+# PHP shared-host backend runtime configuration/data
+ctv_php/config.php
+ctv_php/.htpasswd*
+ctv_php/.setup-token
+ctv_php/.setup.lock
+.ctv-setup-*
+ctv_php/var/*
+!ctv_php/var/.gitkeep

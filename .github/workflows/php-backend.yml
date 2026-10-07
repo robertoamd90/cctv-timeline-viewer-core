@@ -1,0 +1,53 @@
+name: PHP backend
+
+permissions:
+  contents: read
+
+on:
+  push:
+    paths:
+      - 'ctv_php/**'
+      - 'ctv_web/**'
+      - '.github/workflows/php-backend.yml'
+  pull_request:
+    paths:
+      - 'ctv_php/**'
+      - 'ctv_web/**'
+      - '.github/workflows/php-backend.yml'
+
+jobs:
+  php:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, sqlite3
+          coverage: none
+      - name: Lint PHP
+        run: |
+          find ctv_php -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Run PHP tests
+        run: php ctv_php/tests/run.php
+      - name: Run HTTP integration tests
+        run: python3 ctv_php/tests/test_http.py
+      - name: Run setup integration tests
+        run: python3 ctv_php/tests/test_setup.py
+      - name: Run CLI indexing integration tests
+        run: python3 ctv_php/tests/test_indexer.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check modified frontend JavaScript
+        run: |
+          node --check ctv_web/js/app.js
+          node ctv_php/tests/frontend.js

@@ -98,6 +98,10 @@ applyTranslations();
 document.getElementById('language-select').addEventListener('change', event => setLanguage(event.target.value));
 
 async function api(url, opts = {}) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes((opts.method || 'GET').toUpperCase())) {
+    // A non-simple header prevents cross-site forms from using cached Basic auth.
+    opts.headers = { ...opts.headers, 'X-CTV-Request': '1' };
+  }
   if (opts.body && typeof opts.body === 'object') {
     opts.body = JSON.stringify(opts.body);
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' };
@@ -224,6 +228,24 @@ async function loadCameras() {
 
 async function loadSession() {
   S.session = await api('/api/session');
+  const capabilities = S.session.capabilities || {};
+  if (capabilities.transcoding === false) {
+    S.streamProfile = 'native';
+    localStorage.setItem('ctv-stream-profile', 'native');
+    const quality = document.getElementById('quality-select');
+    quality.value = 'native';
+    [...quality.options].forEach(option => {
+      if (option.value !== 'native') option.hidden = true;
+    });
+    document.getElementById('stream-profile-settings').hidden = true;
+  }
+  if (capabilities.home_assistant_events === false) {
+    document.querySelector('.ha-event-picker')?.setAttribute('hidden', '');
+    document.getElementById('event-filter-wrap').hidden = true;
+  }
+  if (capabilities.server_autoscan === false) {
+    document.getElementById('autoscan-settings').hidden = true;
+  }
   const isAdmin = Boolean(S.session.is_admin);
   document.querySelector('.tab[data-tab="cameras"]').hidden = !isAdmin;
   document.getElementById('view-cameras').hidden = !isAdmin;
@@ -247,7 +269,7 @@ async function loadStreamProfiles() {
   document.getElementById('stream-temp-mb').value = playback.hls_temp_mb;
   document.getElementById('quality-select').value = S.streamProfile;
   if (S.session.is_admin) {
-    await loadAutoscanSettings();
+    if (S.session.capabilities?.server_autoscan !== false) await loadAutoscanSettings();
     fillStreamProfileForm('balanced', S.streamProfiles.balanced);
     fillStreamProfileForm('fast', S.streamProfiles.fast);
   }
@@ -651,6 +673,7 @@ function cameraStats(camera) {
 async function scanCam(id) {
   try {
     const camera = S.cameras.find(item => item.id === id);
+    let completedSynchronously = false;
     if (camera?.indexing_mode === 'partitioned') {
       const range = selectedDayRange();
       if (!range) throw new Error(t('cameras.selectDayFirst'));
@@ -660,8 +683,16 @@ async function scanCam(id) {
         { method: 'POST' },
       );
       S.loadingPartitions += result.partitions || 0;
+      completedSynchronously = result.status === 'ready';
     } else {
-      await api('/api/scan/' + id, { method: 'POST' });
+      const result = await api('/api/scan/' + id, { method: 'POST' });
+      completedSynchronously = result.status === 'done';
+    }
+    if (completedSynchronously) {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+      return;
     }
     if (camera) camera.source_status = 'scanning';
     renderCamList();
@@ -1065,7 +1096,7 @@ async function pollLiveUpdates(generation) {
 
 function startLiveUpdates() {
   stopLiveUpdates();
-  if (!liveUpdatesEnabled || document.hidden) return;
+  if (!liveUpdatesEnabled || document.hidden || S.session.capabilities?.realtime_events === false) return;
   if (S.session.deployment === 'homeassistant') {
     // Finite JSON batches avoid an open chunked response through Ingress.
     return pollLiveUpdates(liveGeneration);
@@ -1263,7 +1294,12 @@ document.getElementById('btn-scan-all').onclick = async () => {
       );
       S.loadingPartitions += result.partitions || 0;
     }
-    await api('/api/scan', { method: 'POST' });
+    const scanResult = await api('/api/scan', { method: 'POST' });
+    if (scanResult.status === 'done') {
+      document.getElementById('topbar-status').textContent = t('status.ready');
+      await loadCameras();
+      await loadTimeline(undefined, undefined, false);
+    }
   }
   catch(e) { toast(t('cameras.errorScan', {message: localizeMessage(e.message)}), 'error'); }
 };

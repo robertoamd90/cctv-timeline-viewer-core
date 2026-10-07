@@ -1,0 +1,11 @@
+Options -Indexes -MultiViews
+RewriteEngine On
+
+# Forward Basic credentials when PHP is served by CGI/FastCGI.
+RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+# Never expose dotfiles, or serve uploaded files around PHP authentication.
+RewriteRule (^|/)\. - [F,END]
+# The one-time installer verifies a private token instead of viewer credentials.
+RewriteRule ^(?:index|setup)\.php$ - [END]
+RewriteRule ^ index.php [QSA,END]

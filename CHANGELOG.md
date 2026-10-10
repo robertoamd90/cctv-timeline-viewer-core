@@ -2,6 +2,10 @@
 
 ## 0.1.31
 
+- Detect buffered decoders that stop advancing without reporting an error.
+  Isolate the frozen recording after eight seconds and keep the timeline
+  advancing even when every camera freezes while Play remains active.
+
 - Cancel abandoned video reads through AnyIO scopes and shield file cleanup.
   Keep worker capacity and cache pins held until slow disk/network reads return;
   direct task cancellation previously allowed worker threads to grow past limits.

@@ -248,3 +248,52 @@ async function asyncTests() {
 asyncTests().then(() => console.log('Player recovery tests passed')).catch(error => {
   console.error(error); process.exitCode = 1;
 });
+
+// Buffered decoders can freeze silently: isolate them without stopping playback.
+{
+  const frozen = video({transport:'native', buffered:5});
+  frozen.src = '/frozen';
+  const ctx = setup([frozen]);
+  let now = 1000; ctx.performance.now = () => now;
+  ctx.checkVideoProgress(frozen);
+  now += 7999; ctx.checkVideoProgress(frozen);
+  assert.notEqual(frozen.parentElement.dataset.failed, '1');
+  frozen.currentTime += 0.2; ctx.checkVideoProgress(frozen);
+  now += 7999; ctx.checkVideoProgress(frozen);
+  assert.notEqual(frozen.parentElement.dataset.failed, '1');
+  now++; ctx.checkVideoProgress(frozen);
+  assert.equal(frozen.parentElement.dataset.failed, '1');
+  assert.equal(ctx.S.playing, true);
+}
+for (const state of ['paused', 'buffering', 'seeking', 'unplayed', 'unbuffered']) {
+  const v = video({transport:'native', buffered:5});
+  const ctx = setup([v]); let now = 1000; ctx.performance.now = () => now;
+  ctx.checkVideoProgress(v);
+  if (state === 'paused') ctx.S.playing = false;
+  if (state === 'buffering') vm.runInContext('_wasBuffering = true', ctx);
+  if (state === 'seeking') v.seeking = true;
+  if (state === 'unplayed') v.dataset.hasPlayed = '0';
+  if (state === 'unbuffered') v.buffered = {length:0};
+  now += 9000; ctx.checkVideoProgress(v);
+  assert.notEqual(v.parentElement.dataset.failed, '1', state);
+}
+
+// If every decoder freezes while Play remains active, the clock must resume
+// from wall time after isolating the frozen tiles, including at mobile speeds.
+for (const speed of [1, 16]) {
+  const frozen = [video({transport:'native', buffered:5}), video({transport:'native', buffered:5})];
+  frozen[1].dataset.recording = frozen[1].parentElement.dataset.recording = '2';
+  const ctx = setup(frozen); let now = 1000;
+  ctx.performance.now = () => now;
+  ctx.S.speed = speed; ctx.S.activeTab = 'timeline';
+  ctx.requestAnimationFrame = () => 1;
+  ctx.updatePlaybackUi = () => {};
+  ctx.updateAutoHotspot = () => {};
+  vm.runInContext('_clockStartTime = S.currentTime; _clockStartWall = performance.now()', ctx);
+  ctx.clockTick();
+  now += 8000; ctx.clockTick();
+  assert.equal(ctx.S.playing, true);
+  assert.ok(frozen.every(v => v.parentElement.dataset.failed === '1'));
+  now += 1000; ctx.clockTick();
+  assert.equal(ctx.S.currentTime, 110 + speed);
+}

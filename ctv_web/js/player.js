@@ -1005,8 +1005,29 @@ function startClock() {
   clockTick();
 }
 
+function checkVideoProgress(video) {
+  const now = performance.now();
+  const key = `${video._generation}:${video.dataset.recording}:${video.getAttribute('src')}`;
+  const progress = video._playbackProgress;
+  if (!S.playing || _wasBuffering || video.seeking ||
+      video.dataset.hasPlayed !== '1' || !videoHasPlaybackBuffer(video)) {
+    video._playbackProgress = null;
+    return;
+  }
+  if (!progress || progress.key !== key || Math.abs(video.currentTime - progress.time) > 0.001) {
+    video._playbackProgress = {key, time: video.currentTime, since: now};
+    return;
+  }
+  // A mobile decoder can freeze with readyState/buffered still reporting ready
+  // and emit neither waiting nor error. Such a tile must not freeze the clock.
+  if (now - progress.since >= 8000 && !videoReachedEnd(video)) {
+    failVideo(video, 'recoveryFailed');
+  }
+}
+
 function clockTick() {
   if (!S.playing || S.activeTab !== 'timeline') { _tickId = null; return; }
+  activeVideos().forEach(checkVideoProgress);
   if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
     activeVideos().filter(video => {
       if (!videoHasPlaybackBuffer(video)) return true;

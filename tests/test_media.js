@@ -179,8 +179,8 @@ assert.match(
 );
 assert.match(
   playerSource,
-  /const keepHlsWarming = v\.dataset\.warming === '1'[\s\S]*?if \(!keepHlsWarming\) pauseVideo\(v\)/,
-  'only HLS streams must advance behind the freeze frame while warming',
+  /if \(!keepVideoWarming\(v\)\) pauseVideo\(v\)/,
+  'warming decisions must use the transport-aware recovery policy',
 );
 assert.match(playerSource, /ctv-preload-mode/);
 assert.match(playerSource, /function updatePlaybackUi/);

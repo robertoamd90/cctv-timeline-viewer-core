@@ -426,3 +426,50 @@ for (const transport of ['mp4', 'hls']) {
   assert.equal(vm.runInContext('_wasBuffering',ctx),true);
   assert.equal(ctx.S.currentTime,100);
 }
+
+// Physical-phone trace: 16x native remains paused at a two-second buffer.
+// Warming must keep playback eligible at 1x without weakening the 4s threshold.
+{
+  const v = video({time:0, buffered:1.991, transport:'native'});
+  v.parentElement.dataset.playbackRate = '16';
+  const ctx = setup([v]); ctx.S.currentTime=100; ctx.S.speed=16;
+  ctx.enterBufferingBarrier(null,null);
+  assert.equal(ctx.requiredBuffer(v),4);
+  assert.equal(ctx.videoHasPlaybackBuffer(v),false);
+  assert.equal(v.playbackRate,1);
+  assert.equal(ctx.keepVideoWarming(v),true);
+  for (const transport of ['mp4','hls']) {
+    v.parentElement.dataset.streamTransport=transport;
+    assert.equal(ctx.keepVideoWarming(v),transport==='hls');
+  }
+}
+// Physical trace: currentTime is retained 496ms behind the buffered range.
+// Re-request the authoritative target once, without a repeated-seek storm.
+{
+  const v = video({time:6.1306998, transport:'native'});
+  v.buffered={length:1,start:()=>6.6270275,end:()=>44.074};
+  v.parentElement.dataset.start='100';
+  const ctx=setup([v]);ctx.S.currentTime=106.1306998;
+  ctx.enterBufferingBarrier(null,null);
+  let assignments=0, media=v.currentTime;
+  Object.defineProperty(v,'currentTime',{get:()=>media,set:value=>{assignments++;media=value;}});
+  v.paused=true;
+  for(let tick=0;tick<60;tick++) ctx.warmNativeBuffer(v);
+  assert.equal(assignments,1);
+  assert.ok(Math.abs(media-6.1306998)<1e-7);
+  assert.equal(v.playbackRate,1);
+  v.seeking=true;ctx.warmNativeBuffer(v);assert.equal(assignments,1);
+  v.seeking=false;v._generation=2;ctx.warmNativeBuffer(v);assert.equal(assignments,2);
+}
+
+// A tile that was ready when the barrier began can lose buffer while paused.
+// It must enter warming too, rather than waiting on a permanently paused tile.
+{
+  const v=video({time:0,buffered:5,transport:'native'});v.paused=true;
+  v.parentElement.dataset.playbackRate='16';
+  const ctx=setup([v]);ctx.S.currentTime=100;ctx.S.speed=16;
+  ctx.enterBufferingBarrier(null,null);assert.equal(v.dataset.warming,'0');
+  v.buffered={length:1,start:()=>0,end:()=>1.991};
+  ctx.warmNativeBuffer(v);
+  assert.equal(v.dataset.warming,'1');assert.equal(v.playbackRate,1);assert.ok(v.plays>0);
+}

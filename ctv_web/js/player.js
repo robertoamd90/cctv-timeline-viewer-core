@@ -418,11 +418,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
       v.dataset.hasPlayed = '1';
       if (_wasBuffering) {
         showFreezeFrame(v);
-        // Native HLS must advance to refresh its playlist. Progressive MP4
-        // keeps downloading while paused and must stay at its zero-time anchor.
-        const keepHlsWarming = v.dataset.warming === '1' &&
-          cell.dataset.streamTransport === 'hls';
-        if (!keepHlsWarming) pauseVideo(v);
+        // HLS refreshes its playlist through playback. Mobile native media
+        // may stop prefetching while paused; warm it at 1x behind the freeze.
+        // Progressive MP4 stays at its URL's zero-time anchor.
+        if (!keepVideoWarming(v)) pauseVideo(v);
         return;
       }
       setPlayerStatus(cell, '');
@@ -843,6 +842,36 @@ function restartProgressiveVideo(video) {
   return true;
 }
 
+function keepVideoWarming(video) {
+  return video.dataset.warming === '1' &&
+    ['native', 'hls'].includes(video.parentElement.dataset.streamTransport);
+}
+
+function warmNativeBuffer(video) {
+  if (!S.playing || !_wasBuffering ||
+      video.parentElement.dataset.streamTransport !== 'native' || video.seeking) return;
+  if (video.dataset.warming !== '1') {
+    if (videoHasPlaybackBuffer(video)) return;
+    video.dataset.warming = '1';
+    video._nativeRecoverySeek = null;
+    video.preload = 'auto';
+    showFreezeFrame(video);
+  }
+  const target = videoTargetTime(video);
+  const seekKey = `${video._generation}:${target}`;
+  // A paused decoder can retain its last frame after the browser evicts that
+  // position. Downloading forward cannot refill a hole behind the buffer.
+  // Request the target once per recovery, even when currentTime already equals
+  // it; repeatedly assigning it would abort the browser's pending Range reads.
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA && video.buffered.length &&
+      bufferedAheadAt(video, target) === 0 && video._nativeRecoverySeek !== seekKey) {
+    video._nativeRecoverySeek = seekKey;
+    video.currentTime = target;
+  }
+  video.playbackRate = 1;
+  if (video.paused) playVideo(video);
+}
+
 function enterBufferingBarrier(source, message) {
   if (source) {
     source.dataset.driftSeek = '0';
@@ -864,11 +893,13 @@ function enterBufferingBarrier(source, message) {
     if ((alreadyBuffering && video.dataset.warming === '1') ||
         (video.parentElement.dataset.transcodeJob && !video.getAttribute('src'))) return;
     pauseVideo(video);
+    if (!alreadyBuffering) video._nativeRecoverySeek = null;
     if (!videoHasPlaybackBuffer(video)) {
       video.dataset.warming = '1';
       showFreezeFrame(video);
       video.preload = 'auto';
-      video.playbackRate = videoPlaybackRate(video);
+      video.playbackRate = video.parentElement.dataset.streamTransport === 'native'
+        ? 1 : videoPlaybackRate(video);
       // Established progressive streams continue downloading while paused.
       // HLS needs playback to refresh its playlist; a new source still needs
       // its initial play handshake. Real MP4 drift is handled by alignVideos.
@@ -1101,6 +1132,7 @@ function clockTick() {
     _tickId = requestAnimationFrame(clockTick);
     return;
   }
+  if (_wasBuffering) videos.forEach(warmNativeBuffer);
   const bufferStates = videos.map(video => ({
     video,
     ready: videoHasPlaybackBuffer(video),

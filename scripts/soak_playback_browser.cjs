@@ -104,6 +104,23 @@ if (require.main === module) (async () => {
           // Mobile browser chrome/orientation can resize a visible page.
           // Keep existing sources and exercise the actual resize handler.
           await page.setViewportSize({width:390,height:760});
+        } else if (disruption === 'paused-prefetch') {
+          // Controlled simulation of the phone's retained ~2s paused buffer.
+          // The decoder and network are real; the exposed TimeRanges are capped
+          // only while paused. This is not an iPhone prefetch-policy test.
+          await page.evaluate(() => {
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'buffered');
+            for (const video of activeVideos()) {
+              Object.defineProperty(video,'buffered',{configurable:true,get() {
+                const ranges = descriptor.get.call(this);
+                if (!this.paused) return ranges;
+                return {length:ranges.length,start:i=>ranges.start(i),
+                  end:i=>Math.min(ranges.end(i),Math.max(ranges.start(i),this.currentTime)+1.991)};
+              }});
+            }
+            enterBufferingBarrier(null,null);
+          });
+          result.simulatedPausedPrefetch = true;
         } else if (disruption === 'clock-error') {
           // Controlled fault: prove the recorder distinguishes a dead clock
           // from stalled media. This does not reproduce a user's root cause.

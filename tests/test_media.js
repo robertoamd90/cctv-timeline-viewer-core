@@ -179,7 +179,7 @@ assert.match(
 );
 assert.match(
   playerSource,
-  /const keepHlsWarming = v\.dataset\.warming === '1'[\s\S]*?if \(!keepHlsWarming\) v\.pause\(\)/,
+  /const keepHlsWarming = v\.dataset\.warming === '1'[\s\S]*?if \(!keepHlsWarming\) pauseVideo\(v\)/,
   'only HLS streams must advance behind the freeze frame while warming',
 );
 assert.match(playerSource, /ctv-preload-mode/);

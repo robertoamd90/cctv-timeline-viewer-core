@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const arg = name => process.argv.find(v => v.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
 const origin = arg('origin') || 'http://127.0.0.1:8765';
+const networkControlUrl = new URL('/__network', origin).toString();
 if (!['127.0.0.1', 'localhost', '[::1]'].includes(new URL(origin).hostname)) throw Error('Local fixture servers only');
 const seconds = Number(arg('seconds') || 120), speed = Number(arg('speed') || 16);
 const engine = arg('engine') || 'chromium', profile = arg('profile') || 'native';
@@ -41,7 +42,7 @@ if (require.main === module) (async () => {
     page.on('console', m => {if (m.type() === 'error') result.errors.push({type:'console', message:m.text()});});
     page.on('response', r => {if (r.status() >= 400) result.errors.push({type:'http',url:r.url(),status:r.status()});});
     if (arg('mbps')) {
-      const shaped = await page.request.post(`${origin}/__network`, {data:{bytes_per_second:Number(arg('mbps'))*1e6/8}});
+      const shaped = await page.request.post(networkControlUrl, {data:{bytes_per_second:Number(arg('mbps'))*1e6/8}});
       if (!shaped.ok()) throw Error('Network shaping requires the synthetic proxy');
       result.mbps = Number(arg('mbps'));
     }
@@ -76,14 +77,20 @@ if (require.main === module) (async () => {
     console.log('Playback started', engine, profile, speed);
     const began = Date.now();
     let disrupted = false;
+    let lastRefresh = -Infinity;
     while (Date.now()-began < seconds*1000) {
       const elapsed = (Date.now()-began)/1000;
-      if (disruption && !disrupted && elapsed >= 5) {
+      if (disruption === 'refresh-burst' && elapsed >= 5 && elapsed < 35 && elapsed - lastRefresh >= 0.5) {
+        lastRefresh = elapsed;
+        await page.evaluate(() => loadTimeline(undefined, undefined, false));
+        result.events.push({action:'timeline-refresh',elapsed});
+      }
+      if (disruption && disruption !== 'refresh-burst' && !disrupted && elapsed >= 5) {
         disrupted = true;
         if (disruption === 'outage') {
-          await page.request.post(`${origin}/__network`, {data:{pause_seconds:5}});
+          await page.request.post(networkControlUrl, {data:{pause_seconds:5}});
         } else if (disruption === 'seek-barrier') {
-          await page.request.post(`${origin}/__network`, {data:{pause_seconds:40}});
+          await page.request.post(networkControlUrl, {data:{pause_seconds:40}});
           await page.evaluate(()=>{S.currentTime += 80; seekPlayersToTime();});
           await page.waitForFunction(()=>_wasBuffering && activeVideos().some(v=>v.readyState < 3));
           await page.evaluate(()=>{S.currentTime += 10; seekPlayersToTime();});
@@ -93,6 +100,57 @@ if (require.main === module) (async () => {
           await page.locator('#btn-play').click();
           await delay(2500);
           await page.locator('#btn-play').click();
+        } else if (disruption === 'viewport-rerender') {
+          // Mobile browser chrome/orientation can resize a visible page.
+          // Keep existing sources and exercise the actual resize handler.
+          await page.setViewportSize({width:390,height:760});
+        } else if (disruption === 'clock-error') {
+          // Controlled fault: prove the recorder distinguishes a dead clock
+          // from stalled media. This does not reproduce a user's root cause.
+          await page.evaluate(() => {
+            const original = updatePlaybackUi;
+            updatePlaybackUi = (...args) => {
+              updatePlaybackUi = original;
+              throw new Error('Synthetic clock UI failure');
+            };
+          });
+        } else if (disruption === 'play-pause-race') {
+          // Actual decoder play()/pause() generates AbortError. Delay delivery
+          // of that rejection to expose the stale-promise ordering explicitly.
+          await page.evaluate(() => {
+            window.__playRace = {rejections:[], staleBarrierEntries:0};
+            const video = activeVideos()[0], originalPlay = video.play.bind(video);
+            const originalBarrier = enterBufferingBarrier;
+            let delayed = false;
+            enterBufferingBarrier = (...args) => {
+              if (delayed && args[0] === video) __playRace.staleBarrierEntries++;
+              return originalBarrier(...args);
+            };
+            video.play = () => {
+              video.play = originalPlay;
+              // Force a genuinely pending browser play on the same URL. This
+              // controlled reload is artificial and must be reported as such.
+              video.load();
+              __playRace.controlledSameSourceReload = true;
+              const promise = originalPlay();
+              enterBufferingBarrier(null,null);
+              return promise.catch(error => new Promise((_,reject) => setTimeout(() => {
+                __playRace.rejections.push({name:error.name,buffering:_wasBuffering,
+                  ready:video.readyState,paused:video.paused,media:video.currentTime});
+                delayed = true; reject(error);
+                setTimeout(() => {delayed = false;}, 10);
+              },500)));
+            };
+            enterBufferingBarrier(null,null);
+          });
+        } else if (disruption === 'play-denied') {
+          // Controlled browser-policy fault, not a spontaneous mobile failure.
+          await page.evaluate(() => {
+            const video = activeVideos()[0], original = video.play.bind(video);
+            window.__restoreDeniedPlay = () => {video.play = original;};
+            video.play = () => Promise.reject(new DOMException('Synthetic browser policy refusal','NotAllowedError'));
+            enterBufferingBarrier(null,null);
+          });
         } else if (disruption === 'visibility-handler') {
           // Exercises the page handler with real decoders, not OS suspension.
           result.simulatedVisibility = true;
@@ -136,6 +194,29 @@ if (require.main === module) (async () => {
     }
     result.events.push(...await page.evaluate(()=>window.__soakEvents));
     result.diagnostics = await page.evaluate(()=>window.ctvPlaybackDiagnostics());
+    result.flightTrace = await page.evaluate(()=>window.ctvExportPlaybackTrace?.() || null);
+    result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
+    if (disruption === 'play-denied') {
+      result.deniedPlayback = await page.evaluate(()=>({playing:S.playing,time:S.currentTime,
+        noticeVisible:!document.getElementById('playback-notice').hidden,
+        diagnostics:ctvPlaybackDiagnostics()}));
+      await page.evaluate(()=>__restoreDeniedPlay());
+      if (result.deniedPlayback.playing) await page.locator('#btn-play').click();
+      await page.locator('#btn-play').click();
+      await delay(2000);
+      result.deniedRecovery = await page.evaluate(()=>({playing:S.playing,time:S.currentTime}));
+    }
+    if (arg('download-trace') === '1') {
+      await page.locator('#btn-stream-options').click();
+      const downloading = page.waitForEvent('download');
+      await page.locator('#btn-playback-trace').click();
+      const download = await downloading;
+      await download.saveAs(output + '.download.json');
+      const trace = JSON.parse(fs.readFileSync(output + '.download.json', 'utf8'));
+      if (trace.schema !== 1 || !trace.samples.length) throw Error('Invalid downloaded playback trace');
+      result.downloadedTrace = {filename:download.suggestedFilename(), samples:trace.samples.length,
+        bytes:fs.statSync(output + '.download.json').size};
+    }
     result.summary = summarize(result);
     fs.mkdirSync(path.dirname(output),{recursive:true});
     fs.writeFileSync(output,JSON.stringify(result,null,2));

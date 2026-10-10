@@ -80,6 +80,7 @@
             <option value="auto" data-i18n="streaming.preloadAuto">Automatic</option>
           </select>
           <div class="hint" data-i18n="streaming.preloadHint">Automatic may start faster but uses more bandwidth.</div>
+          <button id="btn-playback-trace" type="button" data-i18n="player.downloadTrace">Download playback diagnostics</button>
         </div>
       </div>
       <label id="auto-hotspot-control" hidden data-i18n-title="controls.autoHotspot" data-i18n-aria-label="controls.autoHotspot">
@@ -297,7 +298,7 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=file-isolation1"></script>
+<script src="js/i18n.js?v=playback-beta12"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
 <script src="js/media.js?v=playback-mobile3"></script>
@@ -307,7 +308,8 @@
 <script src="js/event-picker.js?v=event-playback1"></script>
 <script src="js/event-filter.js?v=event-playback1"></script>
 <script src="js/timeline.js?v=event-density1"></script>
-<script src="js/player.js?v=hls-sync-beta11"></script>
+<script src="js/player.js?v=playback-beta12"></script>
+<script src="js/playback-trace.js?v=beta12"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);
 document.getElementById('btn-next-frame').onclick = () => jumpToBoundary(1);

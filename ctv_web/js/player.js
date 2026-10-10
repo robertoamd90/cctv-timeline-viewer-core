@@ -16,6 +16,14 @@ window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
 const _nativeMediaCacheToken = Date.now().toString(36);
 const _failedRecordings = new Map();
 const MEDIA_ALIGNMENT_TOLERANCE = 0.1;
+const playbackClockTrace = {tick: null, phase: 'idle'};
+window.ctvPlaybackState = () => ({
+  playing: S.playing, time: S.currentTime, speed: S.speed, profile: S.streamProfile,
+  tab: S.activeTab, buffering: _wasBuffering,
+  recoveryAgeMs: _recoveryStarted == null ? null : performance.now() - _recoveryStarted,
+  tickAgeMs: playbackClockTrace.tick == null ? null : performance.now() - playbackClockTrace.tick,
+  phase: playbackClockTrace.phase,
+});
 
 function hasCompressedPlayback() {
   return S.streamProfile !== 'native' || getVideos().some(video =>
@@ -71,12 +79,38 @@ function streamSessionId() {
     .map(value => value.toString(16).padStart(2, '0')).join('');
 }
 
+function pauseVideo(video) {
+  // pause() rejects a pending play in a later microtask. Invalidate that
+  // attempt before pausing, even when the source and playback epoch survive.
+  video._playAttempt = (video._playAttempt || 0) + 1;
+  video.pause();
+}
+
+function playVideo(video, recoverOnFailure = false) {
+  const generation = video._generation, epoch = _playbackEpoch;
+  const attempt = video._playAttempt = (video._playAttempt || 0) + 1;
+  return video.play().catch(error => {
+    window.ctvTracePlayRejected?.(video, error);
+    if (!S.playing || generation !== video._generation || epoch !== _playbackEpoch ||
+        attempt !== video._playAttempt) return;
+    if (error.name === 'NotAllowedError') {
+      // This is a browser policy denial, not insufficient media data. A fresh
+      // user gesture is required; entering ready-buffer recovery would loop.
+      stopPlayback();
+      document.getElementById('playback-notice-text').textContent = t('player.playbackBlocked');
+      document.getElementById('playback-notice').hidden = false;
+    } else if (recoverOnFailure) {
+      enterBufferingBarrier(video, t('player.buffering'));
+    }
+  });
+}
+
 function cancelHlsSource(video) {
   if (!video) return;
   clearTimeout(video._pauseTimer);
   video._generation = (video._generation || 0) + 1;
   const jobId = video.parentElement?.dataset.transcodeJob || video.parentElement?.dataset.hlsJob;
-  video.pause();
+  pauseVideo(video);
   video.onended = video.onwaiting = video.onstalled = video.onerror = null;
   video.removeAttribute('src');
   video.load();
@@ -338,7 +372,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     empty.hidden = true;
     v.hidden = false;
     setPlayerStatus(cell, t('player.loading'));
-    v.pause();
+    pauseVideo(v);
     v.playbackRate = plan.playbackRate;
     v.loop = false;
     v.onended = () => {
@@ -352,12 +386,12 @@ function updatePlayerCell(cell, cam, rec, cid) {
           onVideoEnded(v, recId);
           return;
         }
-        v.pause();
+        pauseVideo(v);
         seekVideo(v);
         return;
       }
       enterBufferingBarrier(v, t('player.buffering'));
-      v.play().catch(() => {});
+      playVideo(v);
     };
     v.onloadedmetadata = () => {
       v.dataset.metadataReady = '1';
@@ -388,7 +422,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
         // keeps downloading while paused and must stay at its zero-time anchor.
         const keepHlsWarming = v.dataset.warming === '1' &&
           cell.dataset.streamTransport === 'hls';
-        if (!keepHlsWarming) v.pause();
+        if (!keepHlsWarming) pauseVideo(v);
         return;
       }
       setPlayerStatus(cell, '');
@@ -479,7 +513,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.dataset.driftSeek = '0';
     v.dataset.warming = '0';
     clearFreezeFrame(v);
-    v.pause();
+    pauseVideo(v);
     v.onended = v.onloadedmetadata = v.onloadeddata = v.oncanplay = v.onseeked = null;
     v.onplaying = v.onwaiting = v.onstalled = v.onerror = null;
     v.removeAttribute('src');
@@ -800,7 +834,7 @@ function restartProgressiveVideo(video) {
   const cid = parseInt(cell.dataset.cam);
   const cam = S.cameras.find(camera => camera.id === cid);
   const rec = findRecordingAt(cid, S.currentTime);
-  video.pause();
+  pauseVideo(video);
   updatePlayerCell(cell, cam, rec, cid);
   _playerCache[cid] = {
     recId: rec ? String(rec.id) : '',
@@ -829,7 +863,7 @@ function enterBufferingBarrier(source, message) {
   videos.forEach(video => {
     if ((alreadyBuffering && video.dataset.warming === '1') ||
         (video.parentElement.dataset.transcodeJob && !video.getAttribute('src'))) return;
-    video.pause();
+    pauseVideo(video);
     if (!videoHasPlaybackBuffer(video)) {
       video.dataset.warming = '1';
       showFreezeFrame(video);
@@ -840,7 +874,7 @@ function enterBufferingBarrier(source, message) {
       // its initial play handshake. Real MP4 drift is handled by alignVideos.
       if (video.parentElement.dataset.streamTransport !== 'mp4' ||
           video.dataset.hasPlayed !== '1') {
-        video.play().catch(() => {});
+        playVideo(video);
       }
     } else {
       video.dataset.warming = '0';
@@ -890,6 +924,7 @@ function alignVideos(videos) {
 }
 
 function stopPlayback(immediate = false) {
+  playbackClockTrace.phase = 'stopped';
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   S.playing = false;
   _wasBuffering = false;
@@ -897,7 +932,7 @@ function stopPlayback(immediate = false) {
   getVideos().forEach(v => {
     v.dataset.warming = '0';
     clearFreezeFrame(v);
-    v.pause();
+    pauseVideo(v);
     v.preload = S.preloadMode;
     if (v.parentElement.dataset.transcodeJob) {
       if (immediate) { showFreezeFrame(v); cancelHlsSource(v); }
@@ -938,7 +973,7 @@ function reloadPlaybackStreams() {
   const wasPlaying = S.playing;
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   _wasBuffering = false;
-  getVideos().forEach(video => video.pause());
+  getVideos().forEach(pauseVideo);
   renderPlayers(true);
   if (wasPlaying) {
     enterBufferingBarrier(null, null);
@@ -1012,6 +1047,7 @@ function updatePlaybackUi(force = false) {
 
 // ── Global clock ──
 function startClock() {
+  playbackClockTrace.phase = 'starting';
   if (_tickId) cancelAnimationFrame(_tickId);
   _clockStartTime = S.currentTime;
   _clockStartWall = performance.now();
@@ -1040,7 +1076,12 @@ function checkVideoProgress(video) {
 }
 
 function clockTick() {
-  if (!S.playing || S.activeTab !== 'timeline') { _tickId = null; return; }
+  playbackClockTrace.tick = performance.now();
+  playbackClockTrace.phase = 'progress';
+  if (!S.playing || S.activeTab !== 'timeline') {
+    playbackClockTrace.phase = 'stopped';
+    _tickId = null; return;
+  }
   activeVideos().forEach(checkVideoProgress);
   if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
     activeVideos().filter(video => {
@@ -1074,6 +1115,7 @@ function clockTick() {
     (video.dataset.driftSeek !== '1' && !ready)
   );
   if (buffering) {
+    playbackClockTrace.phase = 'buffering';
     if (!_wasBuffering) enterBufferingBarrier(null, null);
     _clockStartTime = S.currentTime;
     _clockStartWall = performance.now();
@@ -1081,6 +1123,7 @@ function clockTick() {
     return;
   }
   if (_wasBuffering) {
+    playbackClockTrace.phase = 'alignment';
     if (!alignVideos(videos) || videos.some(video => !videoHasPlaybackBuffer(video))) {
       _tickId = requestAnimationFrame(clockTick);
       return;
@@ -1092,12 +1135,7 @@ function clockTick() {
       setPlayerStatus(video.parentElement, '');
       video.playbackRate = videoPlaybackRate(video);
       revealFreezeOnNextFrame(video);
-      const generation = video._generation, epoch = _playbackEpoch;
-      video.play().catch(() => {
-        if (S.playing && generation === video._generation && epoch === _playbackEpoch) {
-          enterBufferingBarrier(video, t('player.buffering'));
-        }
-      });
+      playVideo(video, true);
     });
     _clockStartTime = S.currentTime;
     _clockStartWall = performance.now();
@@ -1113,6 +1151,7 @@ function clockTick() {
     const maxSpread = playbackSpreadLimit(videos);
     const spread = Math.max(...videoTimes) - Math.min(...videoTimes);
     if (spread > maxSpread) {
+      playbackClockTrace.phase = 'drift';
       const outlier = timedVideos.reduce((worst, item) => {
         const deviation = Math.abs(item.time - synchronizedTime);
         return !worst || deviation > worst.deviation ? { video: item.video, deviation } : worst;
@@ -1129,6 +1168,7 @@ function clockTick() {
     S.currentTime = _clockStartTime + elapsed;
   }
 
+  playbackClockTrace.phase = 'ui';
   updatePlaybackUi();
   updateAutoHotspot(previousTime, S.currentTime);
 
@@ -1145,7 +1185,9 @@ function clockTick() {
     }
   }
 
+  playbackClockTrace.phase = 'transition';
   reconcilePlaybackPosition();
+  playbackClockTrace.phase = S.playing ? 'scheduled' : 'stopped';
   _tickId = requestAnimationFrame(clockTick);
 }
 

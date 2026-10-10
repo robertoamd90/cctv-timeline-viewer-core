@@ -14,36 +14,46 @@ def main():
     parser.add_argument("--duration", type=int, default=45, help="Real duration of each generated file")
     parser.add_argument("--segments", type=int, default=1, help="Consecutive recordings per camera")
     parser.add_argument("--corrupt-segment", type=int, default=-1, help="Zero-based segment to corrupt on camera 1 only")
+    parser.add_argument("--camera-durations", type=int, nargs=4, help="Different real clip lengths for each camera")
+    parser.add_argument("--camera-offsets", type=float, nargs=4, default=[0, 0, 0, 0], help="Start offsets in seconds for each camera")
     args = parser.parse_args()
     if args.duration <= 0 or args.segments <= 0:
         parser.error("duration and segments must be positive")
+    durations = args.camera_durations or [args.duration] * 4
+    if any(duration <= 0 for duration in durations):
+        parser.error("camera durations must be positive")
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=False)
     timestamp = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    source = root / timestamp.strftime("CAM_%Y%m%d%H%M%S.mp4")
-    subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=15", "-t", str(args.duration),
+    sources = {}
+    for duration in sorted(set(durations)):
+        source = root / f"synthetic-{duration}s.mp4"
+        subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=15", "-t", str(duration),
                     "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "2000k", "-g", "15",
                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(source)], check=True)
+        sources[duration] = source
     os.environ["CTV_DB"] = str(root / "candidate.db")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ctv_server import db
     db.init_db()
     with db.write_db() as conn:
         for camera_id in range(1, 5):
+            duration = durations[camera_id - 1]
+            offset = args.camera_offsets[camera_id - 1]
             conn.execute("INSERT INTO cameras(id,name,source_path,timezone,indexing_mode) VALUES(?,?,?,?,?)",
                          (camera_id, f"Test {camera_id}", str(root), "UTC", "full"))
             for segment in range(args.segments):
-                start = timestamp + datetime.timedelta(seconds=segment * args.duration)
+                start = timestamp + datetime.timedelta(seconds=segment * duration + offset)
                 media = root / f"cam{camera_id}_{start.strftime('%Y%m%d%H%M%S')}.mp4"
                 if camera_id == 1 and segment == args.corrupt_segment:
                     media.write_bytes(b"deliberately invalid synthetic MP4")
                 else:
-                    os.link(source, media)
+                    os.link(sources[duration], media)
                 conn.execute("""INSERT INTO recordings(camera_id,path,filename,start_ts,end_ts,duration,
                          codec,resolution,fps,size,availability,partition_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                         (camera_id, str(media), media.name, start.timestamp(), start.timestamp() + args.duration,
-                          args.duration, "h264", "1280x720", 15, media.stat().st_size, "available", start.strftime("%Y-%m-%d")))
+                         (camera_id, str(media), media.name, start.timestamp(), start.timestamp() + duration,
+                          duration, "h264", "1280x720", 15, media.stat().st_size, "available", start.strftime("%Y-%m-%d")))
     db.close_db()
     shutil.copyfile(root / "candidate.db", root / "baseline.db")
     print(root)

@@ -216,6 +216,66 @@ for (const transport of ['native', 'mp4', 'hls']) {
 }
 
 async function asyncTests() {
+  // pause() aborts a pending play asynchronously. Its rejection must not
+  // re-enter the barrier after a newer resume of the very same source.
+  const resumed = video({buffered:5,transport:'native'});
+  const race = setup([resumed]);
+  race.S.activeTab = 'timeline';
+  race.requestAnimationFrame = () => 1;
+  race.cancelAnimationFrame = () => {};
+  race.updatePlaybackUi = race.updateAutoHotspot = race.revealFreezeOnNextFrame = () => {};
+  let rejectOldPlay;
+  resumed.play = () => {
+    resumed.plays++;
+    return resumed.plays === 1 ? new Promise((_, reject) => {rejectOldPlay = reject;}) : Promise.resolve();
+  };
+  race.enterBufferingBarrier(null,null);
+  race.clockTick();
+  race.enterBufferingBarrier(null,null); // interrupts the pending first play
+  race.clockTick(); // a new play succeeds, with the same generation and epoch
+  assert.equal(vm.runInContext('_wasBuffering',race),false);
+  rejectOldPlay(Object.assign(new Error('Interrupted by pause'),{name:'AbortError'}));
+  await Promise.resolve();
+  assert.equal(vm.runInContext('_wasBuffering',race),false,
+    'an intentionally superseded play must not pause the resumed decoders');
+  let rejectLatestPlay;
+  resumed.play = () => new Promise((_,reject) => {rejectLatestPlay = reject;});
+  race.enterBufferingBarrier(null,null);
+  race.clockTick();
+  rejectLatestPlay(new Error('Current playback failed'));
+  await Promise.resolve();
+  assert.equal(vm.runInContext('_wasBuffering',race),true,
+    'a failure of the current play attempt must still be handled');
+  // Browser policy refusal cannot be repaired by repeatedly pausing/resuming
+  // fully buffered sources. Expose the refusal and leave Play inactive.
+  race.updatePlayButton = () => {};
+  race.clockTick();
+  rejectLatestPlay(Object.assign(new Error('User activation required'),{name:'NotAllowedError'}));
+  await Promise.resolve();
+  assert.equal(race.S.playing,false,'browser-denied playback must not loop with Play active');
+  for (const transport of ['native','mp4','hls']) {
+    const warming = video({buffered:0,transport,played:false});
+    const denied = setup([warming]);
+    denied.updatePlayButton = () => {};
+    warming.play = () => Promise.reject(Object.assign(new Error('Blocked'),{name:'NotAllowedError'}));
+    denied.enterBufferingBarrier(null,null);
+    await Promise.resolve();
+    assert.equal(denied.S.playing,false,`${transport} warm-up refusal must be exposed`);
+    assert.equal(vm.runInContext('_failedRecordings.size',denied),0,
+      'browser policy refusal must not label a valid file as corrupt');
+  }
+  const staleVideo = video({buffered:5});
+  const staleDenied = setup([staleVideo]);
+  let rejectSuperseded;
+  staleVideo.play = () => new Promise((_,reject) => {rejectSuperseded = reject;});
+  staleDenied.playVideo(staleVideo,true);
+  staleDenied.pauseVideo(staleVideo);
+  staleVideo.play = () => Promise.resolve();
+  await staleDenied.playVideo(staleVideo,true);
+  rejectSuperseded(Object.assign(new Error('Old refusal'),{name:'NotAllowedError'}));
+  await Promise.resolve();
+  assert.equal(staleDenied.S.playing,true,'old policy errors must not stop a newer resume');
+
   // A delayed admission from an old seek cannot replace the latest video URL.
   const v = video(); v._generation = 1;
   const ctx = setup([v]); ctx.appUrl = value => value;

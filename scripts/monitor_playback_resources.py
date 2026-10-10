@@ -15,7 +15,8 @@ parser.add_argument("--seconds", type=int, default=600)
 parser.add_argument("--browser-pid", type=int, action="append", default=[], help="PID of a soak_playback_browser.cjs process")
 args = parser.parse_args()
 process = psutil.Process(args.pid)
-if "uvicorn" not in " ".join(process.cmdline()):
+command = " ".join(process.cmdline())
+if "uvicorn" not in command and "scripts/run_playback_ha_fixture.py" not in command:
     parser.error("expected the synthetic uvicorn server PID")
 browser_processes = [psutil.Process(pid) for pid in args.browser_pid]
 if any("soak_playback_browser.cjs" not in " ".join(browser.cmdline()) for browser in browser_processes):

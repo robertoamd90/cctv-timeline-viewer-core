@@ -143,7 +143,11 @@ function resetPlaybackRecovery() {
 }
 
 function finishRecovery() {
-  if (_recoveryStarted != null) playbackDiagnostics.bufferingMs += performance.now() - _recoveryStarted;
+  if (_recoveryStarted != null) {
+    const durationMs = performance.now() - _recoveryStarted;
+    playbackDiagnostics.bufferingMs += durationMs;
+    window.ctvTraceAction?.('buffering-finished', {durationMs});
+  }
   _recoveryStarted = null;
 }
 
@@ -642,6 +646,7 @@ function updateAutoHotspot(previousTime, currentTime) {
 
 // ── Seek ──
 function seekPlayersToTime() {
+  window.ctvTraceAction?.('seek', {time:S.currentTime});
   resetPlaybackRecovery();
   if (hasCompressedPlayback()) {
     renderPlayers(true);
@@ -686,6 +691,7 @@ function onVideoEnded(videoEl, expectedRecId = videoEl.dataset.recording) {
   if (!cam) return;
   const ended = cam.segments.find(s => String(s.id) === curRecId);
   if (!ended) return;
+  window.ctvTraceAction?.('recording-end', {camera:videoEl.parentElement?.dataset.cam, recording:expectedRecId});
   // A duration-less record would otherwise remain active forever after ended.
   if (!Number.isFinite(ended.end_ts) || ended.end_ts <= ended.start_ts) {
     const measuredEnd = absoluteVideoTime(videoEl);
@@ -728,6 +734,15 @@ function bufferedAheadAt(video, current) {
   return 0;
 }
 
+function bufferCoversNativeTail(video, duration) {
+  for (let i = 0; i < video.buffered.length; i++) {
+    if (video.buffered.start(i) <= video.currentTime &&
+        video.buffered.end(i) >= video.currentTime - 0.002 &&
+        video.buffered.end(i) >= duration - 0.002) return true;
+  }
+  return false;
+}
+
 function videoBufferDuration(video) {
   const expected = parseFloat(video.parentElement.dataset.duration);
   const actual = video.duration;
@@ -758,23 +773,41 @@ function videoReachedEnd(video) {
     warming: video.dataset.warming === '1',
   });
   if (completed) return true;
+  if (!S.playing || video.seeking || video.dataset.metadataReady !== '1' ||
+      video.dataset.hasPlayed !== '1') {
+    video._endProgress = null;
+    return false;
+  }
   // Some decoders stop on the final frame without emitting ended. Observe
   // actual media progress, rather than letting a frozen global clock wait
   // forever for that event. Never infer EOF from the indexed duration alone.
   const now = performance.now();
+  const duration = video.duration;
+  const bufferedEnd = video.buffered.length
+    ? video.buffered.end(video.buffered.length - 1) : null;
   const progress = video._endProgress;
-  if (!progress || Math.abs(video.currentTime - progress.time) > 0.001) {
-    video._endProgress = {time: video.currentTime, since: now};
+  const key = `${video._generation}:${video.dataset.recording}`;
+  if (!progress || progress.key !== key || Math.abs(video.currentTime - progress.time) > 0.001 ||
+      !Object.is(duration, progress.duration) || bufferedEnd !== progress.bufferedEnd) {
+    video._endProgress = {key, time: video.currentTime, duration, bufferedEnd, since: now};
     return false;
   }
-  const duration = video.duration;
+  // WebKit may keep NETWORK_LOADING at a fully buffered Native tail without
+  // any next video frame or ended event. Require a contiguous measured tail,
+  // no future decoder data, and stable duration/buffer/media progress. A partial
+  // download, growing file or unfinished HLS playlist is not evidence of EOF.
+  const nativeTail = video.parentElement.dataset.streamTransport === 'native' &&
+    video.readyState === HTMLMediaElement.HAVE_CURRENT_DATA &&
+    Number.isFinite(duration) && duration > 0 &&
+    video.currentTime >= duration - 0.5 && video.currentTime <= duration &&
+    bufferCoversNativeTail(video, duration);
   return S.playing && video.dataset.metadataReady === '1' &&
     video.dataset.hasPlayed === '1' && !video.seeking &&
-    video.networkState === 1 && // NETWORK_IDLE: no download still extending the tail.
+    (nativeTail || video.networkState === 1) &&
     Number.isFinite(duration) && duration > 0 &&
     (video.parentElement.dataset.streamTransport !== 'hls' ||
       (Number.isFinite(expectedDuration) && duration >= expectedDuration - 0.08)) &&
-    video.currentTime >= duration - 0.08 &&
+    (nativeTail || video.currentTime >= duration - 0.08) &&
     video.currentTime <= duration + 0.08 &&
     video.buffered.length > 0 &&
     video.buffered.end(video.buffered.length - 1) >= duration - 0.08 &&
@@ -791,7 +824,11 @@ function videoHasPlaybackBuffer(video) {
     : null;
   const bufferPosition = warmingTarget ?? video.currentTime;
   if (Number.isFinite(expectedDuration) && bufferPosition >= expectedDuration - 0.5) {
-    return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+    // A retained Native frame cannot resume playback: accepting readyState=2
+    // here creates Play/waiting/pause on every tick and renews recovery forever.
+    const minimum = video.parentElement.dataset.streamTransport === 'native'
+      ? HTMLMediaElement.HAVE_FUTURE_DATA : HTMLMediaElement.HAVE_CURRENT_DATA;
+    return !video.seeking && video.readyState >= minimum;
   }
   if (warmingTarget != null) {
     return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
@@ -884,6 +921,7 @@ function enterBufferingBarrier(source, message) {
   if (_recoveryStarted == null) {
     _recoveryStarted = performance.now();
     playbackDiagnostics.recoveries++;
+    window.ctvTraceAction?.('buffering-start', {time:S.currentTime});
   }
   _wasBuffering = true;
   const videos = activeVideos();
@@ -955,6 +993,7 @@ function alignVideos(videos) {
 }
 
 function stopPlayback(immediate = false) {
+  window.ctvTraceAction?.('playback-stop', {immediate});
   playbackClockTrace.phase = 'stopped';
   if (_tickId) { cancelAnimationFrame(_tickId); _tickId = null; }
   S.playing = false;
@@ -991,6 +1030,7 @@ document.getElementById('btn-play').onclick = () => {
   if (hasCancelledHlsSources()) renderPlayers(true);
   else if (hadFailedVideos) renderPlayers();
   S.playing = true; updatePlayButton();
+  window.ctvTraceAction?.('playback-start', {time:S.currentTime,speed:S.speed});
   if (typeof selectedEventTypes !== 'undefined' && selectedEventTypes.size) {
     reconcilePlaybackPosition();
     if (!S.playing) return;

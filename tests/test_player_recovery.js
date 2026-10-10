@@ -473,3 +473,84 @@ for (const transport of ['mp4', 'hls']) {
   ctx.warmNativeBuffer(v);
   assert.equal(v.dataset.warming,'1');assert.equal(v.playbackRate,1);assert.ok(v.plays>0);
 }
+
+// beta.13 physical trace: Native stalls 84ms from the measured end while
+// reporting HAVE_CURRENT_DATA, NETWORK_LOADING and a complete buffered tail.
+{
+  const tail=video({time:187.822038806,transport:'native'});
+  tail.duration=187.906;tail.networkState=2;tail.readyState=2;
+  tail.parentElement.dataset.duration='187.939';
+  tail.buffered={length:1,start:()=>154.04090415,end:()=>187.905};
+  const ctx=setup([tail]);ctx.S.currentTime=287.822038806;
+  ctx.S.speed=16;ctx.S.activeTab='timeline';
+  assert.equal(ctx.videoHasPlaybackBuffer(tail),false,
+    'a retained tail frame is not evidence the decoder can resume');
+  let now=1000;ctx.performance.now=()=>now;
+  assert.equal(ctx.videoReachedEnd(tail),false);
+  now+=1499;assert.equal(ctx.videoReachedEnd(tail),false);
+  now++;assert.equal(ctx.videoReachedEnd(tail),true,
+    'complete stable Native tail must transition even with NETWORK_LOADING');
+}
+
+// Do not infer EOF from an interrupted/growing tail or from a live HLS buffer.
+for (const state of ['partial','gap','smallGap','growingDuration','growingBuffer','futureData','hls','seeking','unplayed','middle']) {
+  const tail=video({time:187.822038806,transport:'native'});
+  tail.duration=187.906;tail.networkState=2;tail.readyState=2;
+  tail.parentElement.dataset.duration='187.939';
+  let end=187.905;
+  tail.buffered={length:1,start:()=>state==='gap'?187.88:state==='smallGap'?187.84:154,end:()=>end};
+  const ctx=setup([tail]);let now=1000;ctx.performance.now=()=>now;
+  ctx.videoReachedEnd(tail);
+  if(state==='partial')end=187.85;
+  if(state==='growingDuration')tail.duration=188.1;
+  if(state==='growingBuffer')end=187.906;
+  if(state==='futureData')tail.readyState=3;
+  if(state==='hls')tail.parentElement.dataset.streamTransport='hls';
+  if(state==='seeking')tail.seeking=true;
+  if(state==='unplayed')tail.dataset.hasPlayed='0';
+  if(state==='middle')tail.currentTime=185;
+  now+=2000;
+  assert.equal(ctx.videoReachedEnd(tail),false,state);
+  if(['partial','gap','smallGap','hls','seeking','unplayed','middle','futureData'].includes(state)) {
+    now+=2000;assert.equal(ctx.videoReachedEnd(tail),false,state+' persists');
+  }
+}
+
+// Replay waiting/pause synchronously across clock ticks. Recovery must not be
+// renewed every frame, and completion must use the normal next-file transition.
+{
+  const tail=video({time:187.822038806,transport:'native'});
+  tail.duration=187.906;tail.networkState=2;tail.readyState=2;tail.paused=true;
+  tail.parentElement.dataset.duration='187.939';
+  tail.buffered={length:1,start:()=>154.04090415,end:()=>187.905};
+  const ctx=setup([tail]);let now=1000;ctx.performance.now=()=>now;
+  ctx.S.currentTime=287.822038806;ctx.S.speed=16;ctx.S.activeTab='timeline';
+  ctx.requestAnimationFrame=()=>1;
+  ctx.updatePlaybackUi=ctx.updateAutoHotspot=ctx.revealFreezeOnNextFrame=ctx.reconcilePlaybackPosition=()=>{};
+  tail.pause=function(){this.paused=true;this.pauses++;};
+  tail.play=function(){this.paused=false;this.plays++;ctx.enterBufferingBarrier(this,'buffering');return Promise.resolve();};
+  ctx.onVideoEnded=()=>{ctx.completed=true;tail.hidden=true;ctx.S.currentTime=287.94;};
+  ctx.enterBufferingBarrier(tail,'buffering');
+  const started=vm.runInContext('_recoveryStarted',ctx);
+  for(let tick=0;tick<89;tick++) {now=1000+tick*1000/60;ctx.clockTick();}
+  assert.equal(vm.runInContext('_recoveryStarted',ctx),started);
+  assert.ok(tail.plays<=2,'waiting must not cause repeated Play attempts');
+  now=2501;ctx.clockTick();
+  assert.equal(ctx.completed,true);
+  assert.equal(tail.parentElement.dataset.failed,undefined,'normal EOF is not a broken recording');
+}
+
+// Tail stability belongs to the active source and actual playback, not to time
+// spent paused or a previous recording with the same measured duration.
+{
+  const tail=video({time:187.822038806,transport:'native'});
+  tail.duration=187.906;tail.readyState=2;tail.networkState=2;
+  tail.parentElement.dataset.duration='187.939';
+  tail.buffered={length:1,start:()=>154,end:()=>187.905};
+  const ctx=setup([tail]);let now=1000;ctx.performance.now=()=>now;
+  ctx.videoReachedEnd(tail);now+=1500;assert.equal(ctx.videoReachedEnd(tail),true);
+  tail._generation=2;assert.equal(ctx.videoReachedEnd(tail),false);
+  now+=1500;assert.equal(ctx.videoReachedEnd(tail),true);
+  ctx.S.playing=false;ctx.videoReachedEnd(tail);now+=5000;
+  ctx.S.playing=true;assert.equal(ctx.videoReachedEnd(tail),false);
+}

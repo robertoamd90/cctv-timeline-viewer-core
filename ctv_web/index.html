@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app.title">CTV - CCTV Timeline Viewer</title>
-<link rel="stylesheet" href="style.css?v=event-density1">
+<link rel="stylesheet" href="style.css?v=session-beta14">
 </head>
 <body>
 
@@ -80,7 +80,11 @@
             <option value="auto" data-i18n="streaming.preloadAuto">Automatic</option>
           </select>
           <div class="hint" data-i18n="streaming.preloadHint">Automatic may start faster but uses more bandwidth.</div>
-          <button id="btn-playback-trace" type="button" data-i18n="player.downloadTrace">Download playback diagnostics</button>
+          <label class="trace-toggle"><input id="playback-trace-enabled" type="checkbox"><span data-i18n="player.enableTrace">Record full playback session</span></label>
+          <div class="hint" data-i18n="player.traceHint">Enable before loading the day. Stop the log when finished; a new recording replaces the previous one.</div>
+          <div id="playback-trace-status" class="hint" role="status" data-i18n="player.traceDisabled">Session recording disabled</div>
+          <button id="btn-playback-trace-stop" type="button" disabled data-i18n="player.stopTrace">Stop log</button>
+          <button id="btn-playback-trace" disabled type="button" data-i18n="player.downloadTrace">Download playback diagnostics</button>
         </div>
       </div>
       <label id="auto-hotspot-control" hidden data-i18n-title="controls.autoHotspot" data-i18n-aria-label="controls.autoHotspot">
@@ -298,22 +302,22 @@
 
 <div id="toast"></div>
 
-<script src="js/i18n.js?v=playback-beta12"></script>
+<script src="js/i18n.js?v=playback-beta14"></script>
 <script src="js/hotspot.js?v=0.1.15"></script>
 <script src="js/geometry.js?v=0.1.15"></script>
 <script src="js/media.js?v=playback-mobile3"></script>
 <script src="js/event-playback.js?v=event-playback1"></script>
-<script src="js/app.js?v=ingress-poll1"></script>
+<script src="js/app.js?v=session-beta14"></script>
 <script src="js/event-icons.js?v=event-playback1"></script>
 <script src="js/event-picker.js?v=event-playback1"></script>
 <script src="js/event-filter.js?v=event-playback1"></script>
 <script src="js/timeline.js?v=event-density1"></script>
-<script src="js/player.js?v=playback-beta13"></script>
-<script src="js/playback-trace.js?v=beta12"></script>
+<script src="js/player.js?v=playback-beta14"></script>
+<script src="js/playback-trace.js?v=session-beta14"></script>
 <script>
 document.getElementById('btn-prev-frame').onclick = () => jumpToBoundary(-1);
 document.getElementById('btn-next-frame').onclick = () => jumpToBoundary(1);
-if (window._ctvInit) window._ctvInit();
+Promise.resolve(window.ctvPlaybackTraceReady).then(() => { if (window._ctvInit) window._ctvInit(); });
 </script>
 </body>
 </html>

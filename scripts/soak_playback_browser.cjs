@@ -46,8 +46,11 @@ if (require.main === module) (async () => {
       if (!shaped.ok()) throw Error('Network shaping requires the synthetic proxy');
       result.mbps = Number(arg('mbps'));
     }
+    await page.addInitScript(() => localStorage.setItem('ctvPlaybackTraceEnabled','1'));
+    result.diagnosticEnabled = true;
     await page.goto(origin);
     console.log('Loaded fixture', engine, baseline || 'working-tree');
+    await page.evaluate(() => window.ctvSetPlaybackTraceEnabled(true));
     await page.waitForFunction(()=>S.timeline?.cameras.length === 4 && document.querySelectorAll('#player-area video').length === 4);
     result.capabilities = await page.evaluate(()=>({maxTouchPoints:navigator.maxTouchPoints,
       coarse:matchMedia('(pointer: coarse)').matches,
@@ -104,6 +107,46 @@ if (require.main === module) (async () => {
           // Mobile browser chrome/orientation can resize a visible page.
           // Keep existing sources and exercise the actual resize handler.
           await page.setViewportSize({width:390,height:760});
+        } else if (disruption === 'native-tail') {
+          // Controlled replay of beta.13 phone state on a real Native decoder.
+          // State properties are injected: this is not a natural iPhone stall.
+          await page.evaluate(() => {
+            const video = activeVideos().find(v => v.parentElement.dataset.streamTransport === 'native' && Number.isFinite(v.duration));
+            if (!video) throw Error('Native tail injection requires a loaded decoder');
+            const duration = video.duration, tail = duration - 0.083961194;
+            const originalEnded = onVideoEnded, handler = video.onended;
+            const hidden = getVideos().filter(v => v !== video).map(v => [v,v.hidden]);
+            hidden.forEach(([v])=>{pauseVideo(v);v.hidden=true;});
+            window.__nativeTailFault = {recording:video.dataset.recording,generation:video._generation,
+              injectedWall:performance.now(),duration,tail,bufferedEnd:duration-0.001};
+            video.onended = null;
+            // Keep the actual decoder active, but expose the phone's stuck state.
+            for(const [key,value] of Object.entries({currentTime:tail,duration,
+              readyState:2,networkState:2,ended:false,
+              buffered:{length:1,start:()=>Math.max(0,duration-34),end:()=>duration-0.001}})) {
+              Object.defineProperty(video,key,{configurable:true,get:()=>value,set:()=>{}});
+            }
+            const originalPlay = video.play.bind(video);
+            video.play = () => {
+              const promise = originalPlay();
+              queueMicrotask(()=>video.dispatchEvent(new Event('waiting')));
+              return promise;
+            };
+            onVideoEnded = (endedVideo,...args) => {
+              if (endedVideo === video) {
+                __nativeTailFault.transitionWall = performance.now();
+                __nativeTailFault.failed = video.parentElement.dataset.failed === '1';
+                for(const key of ['currentTime','duration','readyState','networkState','ended','buffered']) delete video[key];
+                video.play = originalPlay;video.onended=handler;
+                hidden.forEach(([v,wasHidden])=>{v.hidden=wasHidden;});
+                onVideoEnded=originalEnded;
+              }
+              return originalEnded(endedVideo,...args);
+            };
+            S.currentTime = absoluteVideoTime(video);
+            enterBufferingBarrier(video,t('player.buffering'));
+          });
+          result.simulatedNativeTail = true;
         } else if (disruption === 'paused-prefetch') {
           // Controlled simulation of the phone's retained ~2s paused buffer.
           // The decoder and network are real; the exposed TimeRanges are capped
@@ -213,6 +256,7 @@ if (require.main === module) (async () => {
     result.diagnostics = await page.evaluate(()=>window.ctvPlaybackDiagnostics());
     result.flightTrace = await page.evaluate(()=>window.ctvExportPlaybackTrace?.() || null);
     result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
+    result.nativeTailFault = await page.evaluate(()=>window.__nativeTailFault || null);
     if (disruption === 'play-denied') {
       result.deniedPlayback = await page.evaluate(()=>({playing:S.playing,time:S.currentTime,
         noticeVisible:!document.getElementById('playback-notice').hidden,

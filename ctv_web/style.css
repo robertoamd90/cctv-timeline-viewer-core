@@ -83,7 +83,8 @@ body {
 #camera-filter-menu.open { display: block; }
 #stream-options-menu {
   display: none; position: absolute; z-index: 80; top: calc(100% + 6px); right: 0;
-  width: 230px; padding: 10px; background: var(--surface);
+  width: 260px; padding: 10px; background: var(--surface);
+  max-height: calc(100dvh - 150px); overflow-y: auto;
   border: 1px solid var(--border); border-radius: 6px;
   box-shadow: 0 10px 28px rgba(0,0,0,0.45);
 }
@@ -647,3 +648,7 @@ label[for=cam-event-position] { display:block; margin-top:16px; }
 .autoscan-toggle input { width:auto; margin:0; flex-shrink:0; }
 
 #autoscan-settings { padding:16px; border-top:1px solid var(--border); }
+
+#stream-options-menu .trace-toggle { display: flex; align-items: center; gap: 8px; }
+#stream-options-menu .trace-toggle input { width: auto; flex-shrink: 0; }
+#stream-options-menu button { margin-top: 8px; }

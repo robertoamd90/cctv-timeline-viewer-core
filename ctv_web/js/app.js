@@ -102,14 +102,19 @@ async function api(url, opts = {}) {
     opts.body = JSON.stringify(opts.body);
     opts.headers = { ...opts.headers, 'Content-Type': 'application/json' };
   }
-  const res = await fetch(appUrl(url), opts);
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    let msg = body;
-    try { const j = JSON.parse(body); msg = j.detail || body; } catch {}
-    throw new Error(msg || `${res.status} ${res.statusText}`);
-  }
-  return res.json();
+  const trace = window.ctvTraceApiStart?.(url, opts.method || 'GET');
+  let status = null, ok = false;
+  try {
+    const res = await fetch(appUrl(url), opts);
+    status = res.status;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      let msg = body;
+      try { const j = JSON.parse(body); msg = j.detail || body; } catch {}
+      throw new Error(msg || `${res.status} ${res.statusText}`);
+    }
+    const result = await res.json(); ok = true; return result;
+  } finally { window.ctvTraceApiEnd?.(trace, status, ok); }
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -794,11 +799,13 @@ async function initializeTimelineDate() {
 let timelineLoadSequence = 0;
 async function loadTimeline(from, to, prepare = true) {
   const requestId = ++timelineLoadSequence;
+  const traceStarted = window.ctvTraceEnabled?.() ? performance.now() : null;
   try {
     if (from == null || to == null) {
       const range = selectedDayRange();
       if (range) [from, to] = range;
     }
+    window.ctvTraceAction?.('day-load-start', {requestId, from, to, prepare});
     const cameraQuery = S.visibleCameraIds.length ? S.visibleCameraIds.join(',') : '';
     if (prepare && from != null && to != null) {
       S.partitionProgress = {};
@@ -814,10 +821,11 @@ async function loadTimeline(from, to, prepare = true) {
     if (to != null) url += 'to=' + to + '&';
     if (cameraQuery) url += 'cameras=' + cameraQuery;
     const timeline = await api(url);
-    if (requestId !== timelineLoadSequence) return;
+    if (requestId !== timelineLoadSequence) { window.ctvTraceAction?.('day-load-superseded', {requestId}); return; }
     S.unfilteredTimeline = timeline;
     S.timeline = CtvEventPlayback.filterTimeline(timeline, selectedEventTypes);
-  } catch(e) { toast(t('cameras.errorTimeline'), 'error'); return; }
+  } catch(e) { window.ctvTraceAction?.('day-load-error', {requestId}); toast(t('cameras.errorTimeline'), 'error'); return; }
+  window.ctvTraceAction?.('day-load-data', {requestId, durationMs:traceStarted == null ? null : performance.now()-traceStarted, cameras:S.timeline?.cameras.length || 0});
   if (!S.timeline || !S.timeline.cameras.length) {
     const range = selectedDayRange() || [0, 86400];
     S.timeline = { from: range[0], to: range[1], cameras: [] };
@@ -853,6 +861,7 @@ async function loadTimeline(from, to, prepare = true) {
   if (S.autoHotspot && S.layoutMode === 'hotspot') syncAutoHotspotAtCurrentTime();
   renderPlayers();
   updateTimeDisplay();
+  window.ctvTraceAction?.('day-load-rendered', {requestId, durationMs:traceStarted == null ? null : performance.now()-traceStarted});
 }
 
 async function changeDay(delta) {

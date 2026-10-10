@@ -30,6 +30,6 @@ Thumbs.db
 
 # Private session notes, diagnostic traces and recovery backups.
 /.private-session/
-/STABILIZATION*.md
-/docs/stabilization*.json
-/cctv-playback-trace*.json
+STABILIZATION*.md
+stabilization*.json
+cctv-playback-trace*.json

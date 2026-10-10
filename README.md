@@ -425,8 +425,6 @@ The deeper stabilization checks use `scripts/soak_playback_browser.cjs` with
 Chrome or WebKit and `scripts/monitor_playback_resources.py` (test-only `psutil`).
 The fixture generator accepts `--duration`, `--segments`, and `--corrupt-segment`
 for consecutive, duration-consistent recordings and an isolated invalid file.
-See [STABILIZATION_REPORT.md](STABILIZATION_REPORT.md) for the measured results,
-reproduction commands, touch-emulation limitations and suspended release status.
 
 ## License
 

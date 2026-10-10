@@ -1,4 +1,4 @@
-// Local synthetic archives only. See STABILIZATION_REPORT.md for commands/limits.
+// Local synthetic archives only.
 // Separate Playwright browsers; a touch viewport is not a physical phone.
 const fs = require('node:fs');
 const cp = require('node:child_process');

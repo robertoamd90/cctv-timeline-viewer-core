@@ -27,3 +27,9 @@ Thumbs.db
 
 # Local design notes and review results.
 /docs/proposals/
+
+# Private session notes, diagnostic traces and recovery backups.
+/.private-session/
+/STABILIZATION*.md
+/docs/stabilization*.json
+/cctv-playback-trace*.json

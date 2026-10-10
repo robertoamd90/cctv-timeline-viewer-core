@@ -107,6 +107,42 @@ if (require.main === module) (async () => {
           // Mobile browser chrome/orientation can resize a visible page.
           // Keep existing sources and exercise the actual resize handler.
           await page.setViewportSize({width:390,height:760});
+        } else if (disruption === 'native-target-gap') {
+          await page.evaluate(() => {
+            const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
+              Number.isFinite(v.duration) && v.duration-v.currentTime>10);
+            if (!v) throw Error('Native target injection requires a decoder with remaining media');
+            const originalUpdate=updatePlayerCell,originalFail=failVideo;
+            const target=v.currentTime,recording=v.dataset.recording;
+            const others=getVideos().filter(other=>other!==v).map(other=>[other,other.hidden]);
+            others.forEach(([other])=>{pauseVideo(other);other.hidden=true;});
+            window.__nativeTargetFault={recording,injectedWall:performance.now(),target,
+              timelineTarget:absoluteVideoTime(v),deadlineBefore:null};
+            Object.defineProperty(v,'buffered',{configurable:true,get:()=>({length:1,
+              start:()=>target+1,end:()=>v.duration})});
+            const restore=()=>{
+              delete v.buffered;others.forEach(([other,hidden])=>{other.hidden=hidden;});
+              updatePlayerCell=originalUpdate;failVideo=originalFail;
+            };
+            updatePlayerCell=(cell,cam,rec,cid)=>{
+              if(cell===v.parentElement && String(rec?.id)===recording){
+                __nativeTargetFault.reloadWall=performance.now();
+                __nativeTargetFault.timelineAtReload=S.currentTime;
+                __nativeTargetFault.deadlineAtReload=_recoveryStarted;restore();
+              }
+              return originalUpdate(cell,cam,rec,cid);
+            };
+            failVideo=(video,reason)=>{
+              if(video===v){__nativeTargetFault.failedWall=performance.now();
+                __nativeTargetFault.failureReason=reason;restore();}
+              return originalFail(video,reason);
+            };
+            S.currentTime=__nativeTargetFault.timelineTarget;
+            v._nativeRecoverySeek=null;v._nativeRecoveryReload=null;
+            enterBufferingBarrier(v,'controlled-target-gap');
+            __nativeTargetFault.deadlineBefore=_recoveryStarted;
+          });
+          result.simulatedNativeTargetGap=true;
         } else if (disruption === 'native-tail') {
           // Controlled replay of beta.13 phone state on a real Native decoder.
           // State properties are injected: this is not a natural iPhone stall.
@@ -257,6 +293,7 @@ if (require.main === module) (async () => {
     result.flightTrace = await page.evaluate(()=>window.ctvExportPlaybackTrace?.() || null);
     result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
     result.nativeTailFault = await page.evaluate(()=>window.__nativeTailFault || null);
+    result.nativeTargetFault = await page.evaluate(()=>window.__nativeTargetFault || null);
     if (disruption === 'play-denied') {
       result.deniedPlayback = await page.evaluate(()=>({playing:S.playing,time:S.currentTime,
         noticeVisible:!document.getElementById('playback-notice').hidden,

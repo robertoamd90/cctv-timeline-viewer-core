@@ -138,6 +138,7 @@ function resetPlaybackRecovery() {
   finishRecovery();
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
+    video._nativeRecoveryReload = null;
   });
   document.getElementById('playback-notice').hidden = true;
 }
@@ -157,6 +158,8 @@ function failVideo(video, code = 'unplayable') {
   if (!recording) return;
   const known = ['capacity', 'storage_limit', 'encoding', 'recoveryFailed', 'session_expired'];
   const reason = known.includes(code) ? code : 'unplayable';
+  window.ctvTraceAction?.('recording-failed', {camera:cell.dataset.cam, recording, reason,
+    video:window.ctvTraceEnabled?.() ? window.CtvPlaybackTrace?.videoState(video) : undefined});
   _failedRecordings.set(recording, reason);
   cancelHlsSource(video);
   cell.dataset.failed = '1';
@@ -884,11 +887,61 @@ function keepVideoWarming(video) {
     ['native', 'hls'].includes(video.parentElement.dataset.streamTransport);
 }
 
+function nativeRecoveryTargetReady(video) {
+  if (video.seeking || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
+  const target = videoTargetTime(video);
+  const duration = videoBufferDuration(video);
+  if (Number.isFinite(duration) && target >= duration - 0.5) {
+    return video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA || videoReachedEnd(video);
+  }
+  return bufferedAheadAt(video, target) >= requiredBuffer(video, target);
+}
+
+function recoveryVideoFailed(video) {
+  const cell = video.parentElement;
+  // A Native tile with the requested data available needs alignment, even if
+  // another tile held the barrier long enough for its media time to drift.
+  if (cell.dataset.streamTransport === 'native' && nativeRecoveryTargetReady(video)) return false;
+  if (!videoHasPlaybackBuffer(video)) return true;
+  if (cell.dataset.streamTransport === 'mp4' &&
+      Number(cell.dataset.duration) - videoTargetTime(video) <= 0.5) return false;
+  return Math.abs(video.currentTime - videoTargetTime(video)) > MEDIA_ALIGNMENT_TOLERANCE;
+}
+
+function reloadNativeRecovery(video, target) {
+  const cell = video.parentElement;
+  const key = `${_playbackEpoch}:${video.dataset.recording}:${target}`;
+  if (video._nativeRecoveryReload === key) return false;
+  const cid = Number(cell.dataset.cam);
+  const cam = S.cameras.find(item => item.id === cid);
+  const rec = findRecordingAt(cid, S.currentTime);
+  if (!cam || !rec || String(rec.id) !== video.dataset.recording) return false;
+  video._nativeRecoveryReload = key;
+  window.ctvTraceAction?.('native-recovery-reload', {
+    camera:String(cid), recording:String(rec.id), target, mediaTime:video.currentTime,
+    bufferedStart:video.buffered.length ? video.buffered.start(0) : null,
+  });
+  // Reinstall source-generation guards through the normal loader. The global
+  // clock and the original recovery deadline remain authoritative.
+  updatePlayerCell(cell, cam, rec, cid);
+  video.dataset.warming = '1';
+  video.preload = 'auto';
+  video.playbackRate = 1;
+  video._nativeRecoverySeek = null;
+  return true;
+}
+
 function warmNativeBuffer(video) {
   if (!S.playing || !_wasBuffering ||
       video.parentElement.dataset.streamTransport !== 'native' || video.seeking) return;
+  // Once its target is buffered, hold and align this decoder independently of
+  // the other tiles. Continuing 1x warming can evict the very target we need.
+  if (nativeRecoveryTargetReady(video)) {
+    if (!video.paused) pauseVideo(video);
+    seekVideo(video);
+    return;
+  }
   if (video.dataset.warming !== '1') {
-    if (videoHasPlaybackBuffer(video)) return;
     video.dataset.warming = '1';
     video._nativeRecoverySeek = null;
     video.preload = 'auto';
@@ -896,6 +949,10 @@ function warmNativeBuffer(video) {
   }
   const target = videoTargetTime(video);
   const seekKey = `${video._generation}:${target}`;
+  if (video._nativeRecoverySeek === seekKey &&
+      bufferedAheadAt(video, target) === 0 &&
+      video.currentTime > target + MEDIA_ALIGNMENT_TOLERANCE &&
+      reloadNativeRecovery(video, target)) return;
   // A paused decoder can retain its last frame after the browser evicts that
   // position. Downloading forward cannot refill a hole behind the buffer.
   // Request the target once per recovery, even when currentTime already equals
@@ -1155,15 +1212,11 @@ function clockTick() {
   }
   activeVideos().forEach(checkVideoProgress);
   if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
-    activeVideos().filter(video => {
-      if (!videoHasPlaybackBuffer(video)) return true;
-      const target = videoTargetTime(video);
-      const cell = video.parentElement;
-      if (cell.dataset.streamTransport === 'mp4' &&
-          Number(cell.dataset.duration) - target <= 0.5) return false;
-      return Math.abs(video.currentTime - target) > MEDIA_ALIGNMENT_TOLERANCE;
-    }).forEach(video => failVideo(video, 'recoveryFailed'));
+    activeVideos().filter(recoveryVideoFailed).forEach(video => failVideo(video, 'recoveryFailed'));
     finishRecovery();
+    // Surviving tiles may still need the seek back to their buffered target.
+    // Give that alignment its own recovery, rather than leaving no deadline.
+    if (activeVideos().length) enterBufferingBarrier(null, null);
   }
   const videos = activeVideos();
   const completed = videos.find(videoReachedEnd);

@@ -554,3 +554,88 @@ for (const state of ['partial','gap','smallGap','growingDuration','growingBuffer
   ctx.S.playing=false;ctx.videoReachedEnd(tail);now+=5000;
   ctx.S.playing=true;assert.equal(ctx.videoReachedEnd(tail),false);
 }
+
+// Freeze a recovered Native decoder at the requested position while another
+// tile is still loading. Warming must not consume its buffered target.
+{
+  const v=video({time:15,buffered:40,transport:'native'});
+  v.dataset.warming='1';v.paused=false;v.parentElement.dataset.playbackRate='16';
+  v.pause=function(){this.pauses++;this.paused=true;};
+  const ctx=setup([v]);ctx.S.speed=16;ctx.S.currentTime=110;
+  v.buffered={length:1,start:()=>0,end:()=>55};
+  vm.runInContext('_wasBuffering=true;',ctx);
+  ctx.warmNativeBuffer(v);
+  assert.equal(v.pauses,1);
+  assert.equal(v.currentTime,10);
+  assert.equal(ctx.S.currentTime,110);
+  for(let i=0;i<120;i++)ctx.warmNativeBuffer(v);
+  assert.equal(v.plays,0,'a ready held decoder must not keep warming');
+  assert.equal(v.pauses,1);
+}
+// A completed seek that leaves the recovery target outside the buffer needs
+// a fresh source read, once per target/epoch, with the same clock and deadline.
+{
+  const v=video({time:10,transport:'native'});v.dataset.warming='1';
+  v.parentElement.dataset.playbackRate='16';v.paused=false;
+  v.buffered={length:1,start:()=>11,end:()=>50};
+  const ctx=setup([v]);ctx.S.speed=16;ctx.S.currentTime=110;
+  const reloads=[];ctx.reloadNativeRecovery=(v,target)=>{reloads.push(target);return true;};
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  ctx.warmNativeBuffer(v);assert.equal(v.currentTime,10);
+  v.currentTime=12;ctx.warmNativeBuffer(v);
+  assert.deepEqual(reloads,[10]);
+  assert.equal(ctx.S.currentTime,110);assert.equal(vm.runInContext('_recoveryStarted',ctx),500);
+  v.seeking=true;ctx.warmNativeBuffer(v);assert.equal(reloads.length,1);
+}
+
+// A source with target data remains eligible when another source exhausts
+// recovery. A pending seek or missing target still cannot claim readiness.
+{
+  const v=video({time:35,transport:'native'});v.dataset.warming='1';
+  v.parentElement.dataset.playbackRate='16';
+  v.buffered={length:1,start:()=>10,end:()=>55};
+  const ctx=setup([v]);ctx.S.speed=16;
+  vm.runInContext('_wasBuffering=true;',ctx);
+  assert.equal(ctx.recoveryVideoFailed(v),false);
+  v.buffered={length:1,start:()=>11,end:()=>55};
+  assert.equal(ctx.recoveryVideoFailed(v),true);
+  v.buffered={length:1,start:()=>10,end:()=>55};v.seeking=true;
+  assert.equal(ctx.recoveryVideoFailed(v),true);
+}
+// Source reload is bounded across source generations and keeps the deadline.
+{
+ const v=video({time:12,transport:'native'});v.parentElement.dataset.cam='1';
+ const ctx=setup([v]);ctx.S.cameras=[{id:1}];
+ ctx.findRecordingAt=()=>({id:1});let loads=0;
+ ctx.updatePlayerCell=()=>{loads++;v._generation=(v._generation||0)+1;};
+ vm.runInContext('_wasBuffering=true;_recoveryStarted=300;',ctx);
+ assert.equal(ctx.reloadNativeRecovery(v,10),true);
+ assert.equal(ctx.reloadNativeRecovery(v,10),false);assert.equal(loads,1);
+ assert.equal(ctx.S.currentTime,110);assert.equal(vm.runInContext('_recoveryStarted',ctx),300);
+ assert.equal(v.dataset.warming,'1');assert.equal(v.playbackRate,1);
+ ctx.findRecordingAt=()=>({id:2});assert.equal(ctx.reloadNativeRecovery(v,11),false);
+}
+
+// Expiring one source's deadline must preserve and align the healthy source,
+// including a seek that remains asynchronous after the failed tile is removed.
+{
+  const broken=video({time:20,transport:'native'});
+  const healthy=video({time:35,transport:'native'});
+  broken.buffered={length:1,start:()=>20,end:()=>55};
+  healthy.buffered={length:1,start:()=>0,end:()=>55};
+  healthy.dataset.recording='2';healthy.parentElement.dataset.recording='2';
+  broken.dataset.warming=healthy.dataset.warming='1';
+  const ctx=setup([broken,healthy]);ctx.S.activeTab='timeline';
+  ctx.performance.now=()=>31001;ctx.requestAnimationFrame=()=>1;
+  let media=35;Object.defineProperty(healthy,'currentTime',{
+    get:()=>media,set:value=>{media=value;healthy.seeking=true;},
+  });
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=100;',ctx);
+  ctx.clockTick();
+  assert.equal(broken.hidden,true);
+  assert.equal(healthy.hidden,false);
+  assert.equal(healthy.parentElement.dataset.failed,undefined);
+  assert.equal(healthy.currentTime,10);
+  assert.equal(ctx.S.currentTime,110);
+  assert.equal(vm.runInContext('_recoveryStarted',ctx),31001);
+}

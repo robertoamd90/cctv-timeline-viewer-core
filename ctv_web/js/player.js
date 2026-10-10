@@ -15,6 +15,7 @@ window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
   bufferingMs: playbackDiagnostics.bufferingMs + (_recoveryStarted == null ? 0 : performance.now() - _recoveryStarted)});
 const _nativeMediaCacheToken = Date.now().toString(36);
 const _failedRecordings = new Map();
+const MEDIA_ALIGNMENT_TOLERANCE = 0.1;
 
 function hasCompressedPlayback() {
   return S.streamProfile !== 'native' || getVideos().some(video =>
@@ -99,6 +100,7 @@ async function releasePlaybackSession(jobId) {
 
 function resetPlaybackRecovery() {
   _playbackEpoch++;
+  _wasBuffering = false;
   finishRecovery();
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
@@ -759,7 +761,8 @@ function videoHasPlaybackBuffer(video) {
     return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
   }
   if (warmingTarget != null) {
-    return bufferedAheadAt(video, bufferPosition) >= requiredBuffer(video, bufferPosition);
+    return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+      bufferedAheadAt(video, bufferPosition) >= requiredBuffer(video, bufferPosition);
   }
   return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
     bufferedAheadAt(video, video.currentTime) >= requiredBuffer(video);
@@ -775,6 +778,17 @@ function absoluteVideoTime(video) {
     parseFloat(cell.dataset.streamOffset) || 0,
     parseFloat(cell.dataset.streamSpeed) || 1,
   );
+}
+
+function playbackSpreadLimit(videos) {
+  // alignVideos accepts +/- 100ms in encoded media time. At 16x encoded
+  // speed that is +/- 1.6s on the timeline. A stricter spread threshold would
+  // re-enter the barrier immediately after accepting the same alignment,
+  // endlessly pausing healthy decoders and renewing the recovery deadline.
+  const encodedSpeed = Math.max(1, ...videos.map(video =>
+    Number(video.parentElement.dataset.streamSpeed) || 1));
+  return Math.max(S.speed >= 8 ? 0.5 : 0.25,
+    2 * MEDIA_ALIGNMENT_TOLERANCE * encodedSpeed);
 }
 
 function restartProgressiveVideo(video) {
@@ -804,7 +818,7 @@ function enterBufferingBarrier(source, message) {
   // Repeated waiting events belong to the same recovery. In particular, do
   // not start playback again on a progressive stream already filling its buffer.
   const alreadyBuffering = _wasBuffering;
-  if (!alreadyBuffering && _recoveryStarted == null) {
+  if (_recoveryStarted == null) {
     _recoveryStarted = performance.now();
     playbackDiagnostics.recoveries++;
   }
@@ -853,7 +867,7 @@ function alignVideos(videos) {
       return;
     }
     const target = videoTargetTime(video);
-    if (Math.abs(video.currentTime - target) > 0.1) {
+    if (Math.abs(video.currentTime - target) > MEDIA_ALIGNMENT_TOLERANCE) {
       if (cell.dataset.streamTransport === 'mp4') {
         const duration = parseFloat(cell.dataset.duration);
         const remaining = Number.isFinite(duration) ? duration - target : Infinity;
@@ -1035,7 +1049,7 @@ function clockTick() {
       const cell = video.parentElement;
       if (cell.dataset.streamTransport === 'mp4' &&
           Number(cell.dataset.duration) - target <= 0.5) return false;
-      return Math.abs(video.currentTime - target) > 0.1;
+      return Math.abs(video.currentTime - target) > MEDIA_ALIGNMENT_TOLERANCE;
     }).forEach(video => failVideo(video, 'recoveryFailed'));
     finishRecovery();
   }
@@ -1096,7 +1110,7 @@ function clockTick() {
   if (timedVideos.length) {
     const videoTimes = timedVideos.map(item => item.time);
     const synchronizedTime = CtvMedia.medianTime(videoTimes);
-    const maxSpread = S.speed >= 8 ? 0.5 : 0.25;
+    const maxSpread = playbackSpreadLimit(videos);
     const spread = Math.max(...videoTimes) - Math.min(...videoTimes);
     if (spread > maxSpread) {
       const outlier = timedVideos.reduce((worst, item) => {

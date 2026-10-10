@@ -297,3 +297,72 @@ for (const speed of [1, 16]) {
   now += 1000; ctx.clockTick();
   assert.equal(ctx.S.currentTime, 110 + speed);
 }
+
+// Seeking during a buffering barrier must not remove its recovery deadline.
+{
+  const v = video({buffered:0}); const ctx = setup([v]);
+  ctx.enterBufferingBarrier(v, 'buffering');
+  ctx.resetPlaybackRecovery();
+  ctx.enterBufferingBarrier(v, 'buffering');
+  assert.equal(vm.runInContext('_recoveryStarted', ctx), 1000);
+  // An already-active barrier with a missing deadline must repair itself too.
+  vm.runInContext('_recoveryStarted = null', ctx);
+  ctx.enterBufferingBarrier(v, 'buffering');
+  assert.equal(vm.runInContext('_recoveryStarted', ctx), 1000);
+}
+// Data in a warming buffer cannot make a pending seek ready.
+{
+  const v = video({buffered:5}); const ctx = setup([v]);
+  v.dataset.warming = '1'; v.seeking = true;
+  assert.equal(ctx.videoHasPlaybackBuffer(v), false);
+  v.seeking = false;
+  assert.equal(ctx.videoHasPlaybackBuffer(v), true);
+}
+
+// Accepted media alignment must also be accepted by the timeline clock.
+// Encoded 16x HLS can have a small startup phase difference with full buffers.
+for (const transport of ['mp4', 'hls']) {
+  const early = video({time:0, buffered:5, transport});
+  const late = video({time:0.09, buffered:5, transport});
+  for (const v of [early,late]) v.parentElement.dataset.streamSpeed = '16';
+  const ctx = setup([early,late]);
+  ctx.S.speed = 16; ctx.S.currentTime = 100.001;
+  assert.equal(ctx.alignVideos([early,late]), true);
+  const spread = Math.abs(ctx.absoluteVideoTime(early)-ctx.absoluteVideoTime(late));
+  assert.ok(spread <= ctx.playbackSpreadLimit([early,late]),
+    'do not immediately reject the alignment just accepted by the barrier');
+  assert.ok(ctx.playbackSpreadLimit([early,late]) <= 3.2);
+  ctx.S.activeTab = 'timeline';
+  ctx.requestAnimationFrame = () => 1;
+  ctx.updatePlaybackUi = () => {};
+  ctx.updateAutoHotspot = () => {};
+  ctx.enterBufferingBarrier(null,null);
+  ctx.revealFreezeOnNextFrame = () => {};
+  ctx.clockTick();
+  assert.equal(vm.runInContext('_wasBuffering',ctx),false,
+    'ready decoders must escape the barrier instead of looping Pause/Play');
+  const initial=ctx.S.currentTime;
+  for(let tick=0;tick<20;tick++) {
+    early.currentTime+=0.02; late.currentTime+=0.02;
+    ctx.clockTick();
+    assert.equal(vm.runInContext('_wasBuffering',ctx),false);
+  }
+  assert.ok(ctx.S.currentTime > initial+6);
+}
+{
+  const v = video({transport:'native'}); const ctx=setup([v]);
+  ctx.S.speed=16;
+  assert.equal(ctx.playbackSpreadLimit([v]),0.5);
+  ctx.S.speed=1;
+  assert.equal(ctx.playbackSpreadLimit([v]),0.25);
+}
+// A real encoded outlier still enters the barrier; this is not unrestricted drift.
+{
+  const videos=[video({time:0,buffered:5,transport:'hls'}),video({time:0.3,buffered:5,transport:'hls'})];
+  for(const v of videos) v.parentElement.dataset.streamSpeed='16';
+  const ctx=setup(videos);ctx.S.speed=16;ctx.S.currentTime=100;ctx.S.activeTab='timeline';
+  ctx.requestAnimationFrame=()=>1;
+  ctx.clockTick();
+  assert.equal(vm.runInContext('_wasBuffering',ctx),true);
+  assert.equal(ctx.S.currentTime,100);
+}

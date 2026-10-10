@@ -39,8 +39,8 @@ async def proxy(path:str,request:Request):
       next_send=max(time.monotonic(),next_send)+len(chunk)/rate
       ready=next_send
      await asyncio.sleep(max(0,ready-time.monotonic()))
-     while time.monotonic()<paused_until:
-      await asyncio.sleep(min(0.1,paused_until-time.monotonic()))
+    while time.monotonic()<paused_until:
+     await asyncio.sleep(min(0.1,max(0,paused_until-time.monotonic())))
     yield chunk
   finally:
    await response.aclose()

@@ -1349,6 +1349,11 @@ function checkVideoProgress(video) {
       enterBufferingBarrier(video, t('player.buffering'));
       return;
     }
+    if (video.parentElement.dataset.streamTransport === 'native' &&
+        reloadNativeRecovery(video, videoTargetTime(video))) {
+      enterBufferingBarrier(video, t('player.buffering'));
+      return;
+    }
     failVideo(video, 'recoveryFailed');
   }
 }

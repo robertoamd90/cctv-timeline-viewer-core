@@ -769,3 +769,16 @@ for (const state of ['partial','gap','smallGap','growingDuration','growingBuffer
  v.buffered={length:1,start:()=>1,end:()=>8};assert.equal(ctx.nativeDeliveryActive(v),false);
  v.error={code:3};assert.equal(ctx.nativeDeliveryActive(v),false);
 }
+
+// A proven buffered Native decoder freeze gets one guarded source restart
+// before exclusion. The original monitor threshold and clock stay unchanged.
+{
+ const v=video({buffered:20,transport:'native'});v.parentElement.dataset.cam='1';
+ const ctx=setup([v]);let now=1000,reloads=0;ctx.performance.now=()=>now;
+ ctx.reloadNativeRecovery=()=>++reloads===1;
+ ctx.checkVideoProgress(v);now=9001;ctx.checkVideoProgress(v);
+ assert.equal(reloads,1);assert.equal(v.hidden,false);assert.equal(ctx.S.currentTime,110);
+ vm.runInContext('_wasBuffering=false;_recoveryStarted=null;',ctx);
+ ctx.checkVideoProgress(v);now=18002;ctx.checkVideoProgress(v);
+ assert.equal(reloads,2);assert.equal(v.hidden,true);
+}

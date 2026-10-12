@@ -49,7 +49,11 @@ async def proxy(path:str,request:Request):
   await response.aclose()
   # Shaping below still applies to buffered media before delivering it.
   async def buffered_body():
-   yield content
+   # The upstream buffer does not turn a slow network into one delayed burst.
+   # Shape wire delivery in small chunks so concurrent ranges make progress;
+   # cancellation must not leave megabytes of reserved bandwidth debt.
+   for offset in range(0,len(content),16384):
+    yield content[offset:offset+16384]
   chunks=buffered_body()
  else:
   chunks=response.aiter_raw(chunk_size=16384)

@@ -43,7 +43,7 @@ class SlowReadCancellationTests(unittest.TestCase):
                 return anyio.AsyncFile(file)
             async def send(message):
                 await asyncio.sleep(0)
-            scope = {'type':'http', 'method':'GET', 'headers':[(b'range',b'bytes=0-1023')], 'extensions':{}}
+            scope = {'type':'http', 'method':'GET', 'headers':[(b'range',b'bytes=0-')], 'extensions':{}}
             async def perform():
                 started = threading.Event()
                 request_event.set(started)
@@ -73,7 +73,7 @@ class SlowReadCancellationTests(unittest.TestCase):
             self.assertEqual(len(released), 100)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'video.mp4'
-            path.write_bytes(b'x' * 2048)
+            path.write_bytes(b'x' * (5 * 1024 * 1024))
             asyncio.run(exercise(path))
 
 

@@ -81,3 +81,12 @@ console.log('Playback trace tests passed');
   for(let i=0;i<10000;i++) buckets.add({wall:i/10,type:'waiting'},()=>{snapshots++;return {state:'first'};});
   assert.equal(snapshots,1);
 }
+
+// Per-run counters subtract earlier playback on the same page. Old page
+// diagnostics never contribute to the next page's measured totals.
+{
+  const {measuredDiagnostics}=globalThis.CtvPlaybackTrace;
+  assert.deepEqual(measuredDiagnostics({bufferingMs:600,recoveries:7,restarts:1},
+    {bufferingMs:400,recoveries:5,restarts:1}),{bufferingMs:200,recoveries:2,restarts:0});
+  assert.equal(measuredDiagnostics(null,{}),null);
+}

@@ -5,7 +5,7 @@ const CtvMedia = require('../ctv_web/js/media.js');
 
 function video({time = 10, buffered = 0, transport = 'mp4', played = true} = {}) {
   return {
-    currentTime: time, readyState: 3, seeking: false, hidden: false,
+    currentTime: time, readyState: transport === 'native' ? 4 : 3, seeking: false, hidden: false,
     dataset: {recording: '1', hasPlayed: played ? '1' : '0', metadataReady: '1', warming: '0'},
     parentElement: {querySelector: () => ({hidden:false}), dataset: {
       recording: '1', start: '100', streamOffset: '0', streamSpeed: '1',
@@ -428,7 +428,7 @@ for (const transport of ['mp4', 'hls']) {
 }
 
 // Physical-phone trace: 16x native remains paused at a two-second buffer.
-// Warming must keep playback eligible at 1x without weakening the 4s threshold.
+// Priming keeps playback eligible without weakening the 4s resume threshold.
 {
   const v = video({time:0, buffered:1.991, transport:'native'});
   v.parentElement.dataset.playbackRate = '16';
@@ -470,8 +470,11 @@ for (const transport of ['mp4', 'hls']) {
   const ctx=setup([v]);ctx.S.currentTime=100;ctx.S.speed=16;
   ctx.enterBufferingBarrier(null,null);assert.equal(v.dataset.warming,'0');
   v.buffered={length:1,start:()=>0,end:()=>1.991};
-  ctx.warmNativeBuffer(v);
-  assert.equal(v.dataset.warming,'1');assert.equal(v.playbackRate,1);assert.ok(v.plays>0);
+  let now=1000;ctx.performance.now=()=>now;
+  ctx.warmNativeBuffer(v);assert.equal(v.dataset.warming,'1');
+  assert.equal(v.plays,0,'hold the partial fragment while preloading');
+  now+=1001;ctx.warmNativeBuffer(v);
+  assert.equal(v.playbackRate,1);assert.ok(v.plays>0);
 }
 
 // beta.13 physical trace: Native stalls 84ms from the measured end while
@@ -638,4 +641,131 @@ for (const state of ['partial','gap','smallGap','growingDuration','growingBuffer
   assert.equal(healthy.currentTime,10);
   assert.equal(ctx.S.currentTime,110);
   assert.equal(vm.runInContext('_recoveryStarted',ctx),31001);
+}
+
+// Preserve a decoded initial fragment even when it is below the 16x resume
+// threshold. Preparing more data must not consume the requested first frame.
+{
+  const v=video({time:0.02,transport:'native'});v.parentElement.dataset.start='100';v.parentElement.dataset.playbackRate='16';
+  v.buffered={length:1,start:()=>0,end:()=>1.99};v.dataset.warming='1';v.paused=false;
+  v.pause=function(){this.paused=true;this.pauses++;};
+  const ctx=setup([v]);ctx.S.currentTime=100.001;ctx.S.speed=16;
+  vm.runInContext('_wasBuffering=true;',ctx);ctx.warmNativeBuffer(v);
+  assert.equal(v.paused,true,'retain a partial target buffer rather than consuming it at 1x');
+  assert.equal(ctx.videoHasPlaybackBuffer(v),false,'do not lower the 16x resume threshold');
+  assert.equal(v.plays,0);assert.equal(ctx.S.currentTime,100.001);
+}
+
+// A held fragment whose download stops can request a play handshake at the
+// a short pulse; growth returns it to hold, without a seek/Play storm.
+{
+  const v=video({time:0,transport:'native'});v.parentElement.dataset.playbackRate='16';
+  let end=2,now=1000;v.buffered={length:1,start:()=>0,end:()=>end};
+  v.pause=function(){this.paused=true;this.pauses++;};v.play=function(){this.paused=false;this.plays++;return Promise.resolve();};
+  const ctx=setup([v]);ctx.performance.now=()=>now;ctx.S.currentTime=100;ctx.S.speed=16;
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  ctx.warmNativeBuffer(v);assert.equal(v.paused,true);
+  now=1900;ctx.warmNativeBuffer(v);assert.equal(v.plays,0);
+  now=2001;ctx.warmNativeBuffer(v);assert.equal(v.plays,1);assert.equal(v.playbackRate,1);
+  for(let i=0;i<60;i++){now+=16;ctx.warmNativeBuffer(v);}assert.equal(v.plays,1);
+  end=3;ctx.warmNativeBuffer(v);assert.equal(v.paused,true);
+  assert.equal(ctx.videoHasPlaybackBuffer(v),false);
+  end=10;ctx.warmNativeBuffer(v);assert.equal(ctx.videoHasPlaybackBuffer(v),true);
+  assert.equal(ctx.S.currentTime,100);assert.equal(vm.runInContext('_recoveryStarted',ctx),500);
+  v._generation=2;end=2;ctx.warmNativeBuffer(v);
+  assert.equal(v._nativeBufferPreparation.mode,'hold','a replacement source starts its own preparation');
+}
+
+// A pause that reduces the browser's exposed buffer must not cause endless
+// prime/pause cycles. Keep actual streaming readiness, rather than caching a
+// stale full range or weakening the accelerated resume requirement.
+{
+  const v=video({time:0,transport:'native'});v.parentElement.dataset.playbackRate='16';
+  v.dataset.warming='1';v.paused=false;
+  v.pause=function(){this.paused=true;this.pauses++;};v.play=function(){this.paused=false;this.plays++;return Promise.resolve();};
+  Object.defineProperty(v,'buffered',{get:()=>({length:1,start:()=>0,end:()=>v.paused?2:20})});
+  const ctx=setup([v]);ctx.S.currentTime=100;ctx.S.speed=16;
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  ctx.warmNativeBuffer(v);
+  assert.equal(v._nativeBufferPreparation.mode,'flow');assert.equal(v.paused,false);
+  for(let i=0;i<120;i++)ctx.warmNativeBuffer(v);
+  assert.equal(v.pauses,1);assert.equal(v.plays,1);
+  assert.equal(ctx.videoHasPlaybackBuffer(v),true);assert.equal(v.playbackRate,1);
+  assert.equal(ctx.S.currentTime,100);assert.equal(vm.runInContext('_recoveryStarted',ctx),500);
+}
+
+// Buffered startup drift holds only the leading Native decoder. The slower
+// decoder's pending Play remains alive; catching up releases the leader.
+{
+ const lead=video({time:11,buffered:20,transport:'native'});
+ const lag=video({time:10,buffered:20,transport:'native'});
+ const ctx=setup([lead,lag]);ctx.revealFreezeOnNextFrame=()=>{};
+ const items=()=>[{video:lead,time:100+lead.currentTime},{video:lag,time:100+lag.currentTime}];
+ assert.equal(ctx.synchronizeNativeProgress(items(),0.6),true);
+ assert.equal(lead.dataset.syncHeld,'1');assert.equal(lead.pauses,1);assert.equal(lag.pauses,0);
+ for(let i=0;i<60;i++)ctx.synchronizeNativeProgress(items(),0.6);
+ assert.equal(lead.pauses,1);assert.equal(lag.plays,0);
+ lag.currentTime=10.9;assert.equal(ctx.synchronizeNativeProgress(items(),0.6),false);
+ assert.equal(lead.dataset.syncHeld,'0');assert.equal(lead.plays,1);
+ assert.equal(lead.defaultPlaybackRate,ctx.videoPlaybackRate(lead));
+ lag.parentElement.dataset.streamTransport='hls';lead.currentTime=12;
+ assert.equal(ctx.synchronizeNativeProgress(items(),0.6),false,'compressed transports retain their synchronization policy');
+}
+
+// Future data alone does not prove that a cold Native decoder has started.
+// Keep its preparation running until real media progress, then hold without
+// immediately undoing that startup through a redundant tiny seek.
+{
+ const v=video({time:0,buffered:20,transport:'native'});v.readyState=3;v.dataset.warming='1';
+ v.parentElement.dataset.playbackRate='16';v.paused=true;
+ v.pause=function(){this.paused=true;this.pauses++;};v.play=function(){this.paused=false;this.plays++;return Promise.resolve();};
+ const ctx=setup([v]);ctx.S.currentTime=100;ctx.S.speed=16;
+ vm.runInContext('_wasBuffering=true;',ctx);
+ assert.equal(ctx.nativeRecoveryTargetReady(v),false);ctx.warmNativeBuffer(v);
+ assert.equal(v.paused,false);assert.equal(v.pauses,0);
+ v.currentTime=0.03;ctx.warmNativeBuffer(v);assert.equal(v.pauses,0);
+ v.currentTime=0.06;ctx.warmNativeBuffer(v);assert.equal(v.paused,true);
+ assert.equal(v.currentTime,0.06);assert.equal(ctx.nativeRecoveryTargetReady(v),true);
+ assert.equal(ctx.S.currentTime,100);
+}
+
+// Download progress on a partial Native source is not a decoder/file failure.
+// An evicted target or thirty seconds without new data still exhausts recovery.
+{
+ const v=video({time:0,transport:'native'});v.readyState=3;v.networkState=2;
+ let end=5,now=1000;v.buffered={length:1,start:()=>0,end:()=>end};
+ const ctx=setup([v]);ctx.S.currentTime=100;ctx.performance.now=()=>now;
+ ctx.trackNativeDelivery(v);assert.equal(ctx.nativeDeliveryActive(v),true);
+ now=20000;end=10;ctx.trackNativeDelivery(v);now=40000;
+ assert.equal(ctx.nativeDeliveryActive(v),true);
+ end=5;ctx.trackNativeDelivery(v);end=10;ctx.trackNativeDelivery(v);
+ now=50001;assert.equal(ctx.nativeDeliveryActive(v),false,'seeks cannot renew delivery idle time');
+ now=51000;end=12;ctx.trackNativeDelivery(v);
+ v.buffered={length:1,start:()=>1,end:()=>12};assert.equal(ctx.nativeDeliveryActive(v),false,'a missing target cannot hide behind forward delivery');
+ v.buffered={length:1,start:()=>0,end:()=>12};v.readyState=4;
+ assert.equal(ctx.nativeDeliveryActive(v),false,'buffered decoder freezes still use their recovery limit');
+}
+
+// The previous source can briefly retain readyState and ranges during load.
+// Metadata readiness belongs to the new source before it can claim readiness.
+{
+ const v=video({buffered:20,transport:'native'});v.dataset.metadataReady='0';
+ const ctx=setup([v]);assert.equal(ctx.videoHasPlaybackBuffer(v),false);
+ assert.equal(ctx.nativeRecoveryTargetReady(v),false);assert.equal(ctx.selectedFrameReady(v),false);
+ v.dataset.metadataReady='1';assert.equal(ctx.videoHasPlaybackBuffer(v),true);
+}
+
+// A generation-guarded progress signal covers bytes not yet exposed as decoded
+// ranges. A stale source, idle load, error or missing decoded target cannot use it.
+{
+ const v=video({time:0,transport:'native'});v._generation=2;v.networkState=2;v.readyState=1;
+ v.buffered={length:0};v._nativeLoadProgress={generation:2,wall:1000};
+ const ctx=setup([v]);ctx.S.currentTime=100;let now=2000;ctx.performance.now=()=>now;
+ assert.equal(ctx.nativeDeliveryActive(v),true);
+ v._nativeLoadProgress.generation=1;assert.equal(ctx.nativeDeliveryActive(v),false);
+ v._nativeLoadProgress.generation=2;now=31001;assert.equal(ctx.nativeDeliveryActive(v),false);
+ now=32000;v._nativeLoadProgress.wall=31900;v.readyState=3;
+ v.buffered={length:1,start:()=>0,end:()=>8};assert.equal(ctx.nativeDeliveryActive(v),true);
+ v.buffered={length:1,start:()=>1,end:()=>8};assert.equal(ctx.nativeDeliveryActive(v),false);
+ v.error={code:3};assert.equal(ctx.nativeDeliveryActive(v),false);
 }

@@ -10,6 +10,11 @@
     return {
       camera: cell?.dataset.cam, recording: video.dataset.recording,
       generation: video._generation, transport: cell?.dataset.streamTransport,
+      nativeMode:video._nativeBufferPreparation?.mode,
+      nativeStartupConfirmed:video._nativeStartProgress?.confirmed === true,
+      syncHeld:video.dataset.syncHeld === '1',
+      nativeLoadAgeMs:video._nativeLoadProgress
+        ? Math.max(0,Math.round(root.performance.now()-video._nativeLoadProgress.wall)) : null,
       start: cell?.dataset.start, offset: cell?.dataset.streamOffset,
       encodedSpeed: cell?.dataset.streamSpeed, indexedDuration: cell?.dataset.duration,
       playbackRate: video.playbackRate,
@@ -73,8 +78,16 @@
     }
     drain() { const result = Array.from(this.items.values()); this.items.clear(); return result; }
   }
-  root.CtvPlaybackTrace = {boundedPush, videoState, errorText, accumulateSession, EventBuckets};
+  function measuredDiagnostics(current, baseline) {
+    if (!current || !baseline) return null;
+    return Object.fromEntries(['bufferingMs','recoveries','restarts'].map(key =>
+      [key, Math.max(0, (current[key] || 0) - (baseline[key] || 0))]));
+  }
+  root.CtvPlaybackTrace = {boundedPush, videoState, errorText, accumulateSession, EventBuckets, measuredDiagnostics};
   if (!root.document) return;
+  let pageContext = null;
+  const emptyTotals = () => ({observedMs:0,playingMs:0,bufferingMs:0,stalledMs:0,
+    timelineSeconds:0,discontinuities:0,unobservedMs:0});
   const doc = root.document, flag = 'ctvPlaybackTraceEnabled', saved = 'ctvPlaybackTraceSaved';
   const toggle = doc.getElementById('playback-trace-enabled');
   const stopButton = doc.getElementById('btn-playback-trace-stop');
@@ -137,16 +150,37 @@
   }
   function event(type, details = {}) {
     if (!active) return;
-    buckets.add({wall:now(), type, ...details});
+    const wall = now();
+    if (pageContext && type === 'playback-start') {
+      pageContext.runs.push({startedWall:wall, startTime:details.time, speed:details.speed,
+        profile:root.ctvPlaybackState?.().profile, session:emptyTotals(),
+        diagnosticsBaseline:root.ctvPlaybackDiagnostics?.() || null});
+    }
+    const run = pageContext?.runs.at(-1);
+    if (run && type === 'playback-stop' && run.stoppedWall == null) {
+      sample();
+      run.stoppedWall = wall; run.endTime = root.ctvPlaybackState?.().time;
+      run.playerDiagnostics = root.ctvPlaybackDiagnostics?.() || null;
+      run.measuredDiagnostics = measuredDiagnostics(run.playerDiagnostics, run.diagnosticsBaseline);
+    }
+    buckets.add({wall, type, page:meta.pages, ...details});
     // Fail visibly instead of letting a unique-event storm exhaust memory.
     if (buckets.items.size > 2000) { flush(); fail(Error('Event backlog')); }
   }
   function sample() {
     if (!active) return;
     const state = root.ctvPlaybackState?.() || {};
-    const current = {wall:now(), hidden:doc.hidden, ...state,
+    const current = {wall:now(), page:meta.pages, hidden:doc.hidden, ...state,
       videos:Array.from(doc.querySelectorAll('#player-area video')).slice(0,16).map(videoState)};
-    accumulateSession(meta.session, previous, current); previous = current;
+    accumulateSession(meta.session, previous, current);
+    if (pageContext) {
+      accumulateSession(pageContext.session, previous?.page === meta.pages ? previous : null, current);
+      const run = pageContext.runs.at(-1);
+      if (run && run.stoppedWall == null) {
+        accumulateSession(run.session, previous?.wall >= run.startedWall ? previous : null, current);
+      }
+    }
+    previous = current;
     samples.push(current); meta.sampleCount++; meta.lastWall = current.wall;
     meta.lastSample = current;
   }
@@ -156,6 +190,15 @@
     meta.eventCount += chunk.events.reduce((n,e) => n + e.count, 0);
     meta.chunkCount++; chunk.sequence=meta.chunkCount;
     meta.playerDiagnostics = root.ctvPlaybackDiagnostics?.() || null;
+    if (pageContext) {
+      pageContext.lastWall = meta.lastWall;
+      pageContext.playerDiagnostics = meta.playerDiagnostics;
+      pageContext.measuredDiagnostics = measuredDiagnostics(meta.playerDiagnostics, pageContext.diagnosticsBaseline);
+      const run = pageContext.runs.at(-1);
+      if (run && run.stoppedWall == null) {
+        run.measuredDiagnostics = measuredDiagnostics(meta.playerDiagnostics, run.diagnosticsBaseline);
+      }
+    }
     const snapshot = JSON.parse(JSON.stringify(meta));
     pendingWrites++;
     writes = writes.then(async () => {
@@ -191,7 +234,7 @@
   };
   function mediaEvent(type, video, reason) {
     if (!active) return;
-    buckets.add({wall:now(), type, name:reason?.name, video:{camera:video.parentElement?.dataset.cam,
+    buckets.add({wall:now(), type, page:meta.pages, name:reason?.name, video:{camera:video.parentElement?.dataset.cam,
       recording:video.dataset.recording,generation:video._generation}},
       () => ({video:videoState(video), ...(reason ? {message:errorText(reason?.message || reason)} : {})}));
     if (buckets.items.size > 2000) { flush(); fail(Error('Event backlog')); }
@@ -261,8 +304,14 @@
       elapsed = Math.max(meta.lastWall || 0, Date.now() - meta.startedAtEpoch);
       origin = root.performance.now(); previous = meta.lastSample || null;
       samples = []; buckets = new EventBuckets(); failedChunks=[];
-      meta.pages++; active=true; preference(flag,'1'); preference(saved,'1'); attach();
-      event(resume ? 'page-resume' : 'session-start', {page:meta.pages}); sample(); flush(); ui('player.traceActive');
+      meta.pages++;
+      pageContext = {page:meta.pages, startedWall:elapsed, startedAt:new Date().toISOString(),
+        playerBuild:doc.querySelector('script[src*="js/player.js"]')?.getAttribute('src')?.split('?')[1],
+        userAgent:root.navigator.userAgent, viewport:{width:root.innerWidth,height:root.innerHeight},
+        session:emptyTotals(), runs:[], diagnosticsBaseline:root.ctvPlaybackDiagnostics?.() || null};
+      (meta.pageInfo ||= []).push(pageContext);
+      active=true; preference(flag,'1'); preference(saved,'1'); attach();
+      event(resume ? 'page-resume' : 'session-start', {page:meta.pages, playerBuild:pageContext.playerBuild, viewport:pageContext.viewport}); sample(); flush(); ui('player.traceActive');
     } catch (reason) { fail(reason); }
   }
   async function stop() {

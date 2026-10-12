@@ -34,8 +34,15 @@ if (require.main === module) (async () => {
       await page.addInitScript(points => Object.defineProperty(navigator,'maxTouchPoints',{get:()=>points}),points);
       result.touchPointsOverride = points;
     }
-    if (baseline) {
-      const body = source.toString('utf8');
+    if (baseline || arg('priming-rate')) {
+      let body = source.toString('utf8');
+      if (arg('priming-rate')) {
+        const rate=Number(arg('priming-rate'));
+        if (!Number.isFinite(rate) || rate<=0 || rate>1) throw Error('Invalid priming rate');
+        body=body.replace(/const NATIVE_PRIMING_RATE = [^;]+;/, `const NATIVE_PRIMING_RATE = ${rate};`);
+        result.primingRateOverride=rate;
+        result.playerSha256=crypto.createHash('sha256').update(body).digest('hex');
+      }
       await page.route('**/js/player.js*', route => route.fulfill({contentType:'text/javascript', body}));
     }
     page.on('pageerror', e => result.errors.push({type:'page', message:e.message}));
@@ -107,6 +114,51 @@ if (require.main === module) (async () => {
           // Mobile browser chrome/orientation can resize a visible page.
           // Keep existing sources and exercise the actual resize handler.
           await page.setViewportSize({width:390,height:760});
+        } else if (disruption === 'native-initial-fragment') {
+          // Controlled source-buffer policy with real decoders: an initial two
+          // second fragment is lost if consumed before the later data arrives.
+          // Reload repeats that policy; seeking alone cannot restore an evicted
+          // fragment. This models the trace sequence, not an iPhone browser.
+          await page.evaluate(() => {
+            const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
+              Number.isFinite(v.duration) && v.duration-v.currentTime>10);
+            if (!v) throw Error('Initial fragment injection needs remaining media');
+            const descriptor=Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype,'buffered');
+            const originalUpdate=updatePlayerCell,originalFail=failVideo;
+            const target=v.currentTime,recording=v.dataset.recording;
+            S.currentTime=absoluteVideoTime(v);
+            window.__nativeFragmentFault={recording,target,timelineTarget:S.currentTime,
+              injectedWall:performance.now(),reloads:[]};
+            let generation, began, evicted=false;
+            const restore=()=>{delete v.buffered;updatePlayerCell=originalUpdate;failVideo=originalFail;};
+            Object.defineProperty(v,'buffered',{configurable:true,get(){
+              const ranges=descriptor.get.call(this);
+              if(this.dataset.recording!==recording){restore();return ranges;}
+              if(generation!==this._generation){generation=this._generation;began=performance.now();evicted=false;}
+              if(performance.now()-began<3000){
+                if(this.currentTime>target+1)evicted=true;
+                return {length:1,start:()=>target,end:()=>target+1.991};
+              }
+              if(evicted)return {length:1,start:()=>target+1,end:()=>this.duration};
+              if(!__nativeFragmentFault.availableWall)__nativeFragmentFault.availableWall=performance.now();
+              if(S.currentTime>__nativeFragmentFault.timelineTarget+0.5 && !__nativeFragmentFault.resumedWall)
+                __nativeFragmentFault.resumedWall=performance.now();
+              return ranges;
+            }});
+            updatePlayerCell=(cell,cam,rec,cid)=>{
+              if(cell===v.parentElement && String(rec?.id)===recording)
+                __nativeFragmentFault.reloads.push({wall:performance.now(),time:S.currentTime,deadline:_recoveryStarted});
+              return originalUpdate(cell,cam,rec,cid);
+            };
+            failVideo=(video,reason)=>{
+              if(video===v){__nativeFragmentFault.failedWall=performance.now();
+                __nativeFragmentFault.failureReason=reason;restore();}
+              return originalFail(video,reason);
+            };
+            enterBufferingBarrier(v,'controlled-initial-fragment');
+            __nativeFragmentFault.deadlineBefore=_recoveryStarted;
+          });
+          result.simulatedNativeInitialFragment=true;
         } else if (disruption === 'native-target-gap') {
           await page.evaluate(() => {
             const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
@@ -293,6 +345,7 @@ if (require.main === module) (async () => {
     result.flightTrace = await page.evaluate(()=>window.ctvExportPlaybackTrace?.() || null);
     result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
     result.nativeTailFault = await page.evaluate(()=>window.__nativeTailFault || null);
+    result.nativeFragmentFault = await page.evaluate(()=>window.__nativeFragmentFault || null);
     result.nativeTargetFault = await page.evaluate(()=>window.__nativeTargetFault || null);
     if (disruption === 'play-denied') {
       result.deniedPlayback = await page.evaluate(()=>({playing:S.playing,time:S.currentTime,

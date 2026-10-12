@@ -46,10 +46,6 @@ log = logging.getLogger("ctv")
 class VideoFileResponse(FileResponse):
     # Larger sequential reads reduce SMB and proxy overhead during multi-camera fast playback.
     chunk_size = 1024 * 1024
-    # Supervisor buffers responses smaller than 4,194,000 bytes. Keep native
-    # media ranges finite so seeking does not abandon a long proxy stream.
-    ingress_range_size = 2 * 1024 * 1024
-
     def __init__(self, path, *, expected_duration=None, release=None, **kwargs):
         self._release = release
         stat_result = kwargs.get("stat_result") or os.stat(path)
@@ -178,24 +174,10 @@ class VideoFileResponse(FileResponse):
                 await send({'type': 'http.response.body', 'body': f'--{boundary}--'.encode(), 'more_body': False})
 
     async def _send_file(self, scope, receive, send):
-        request_headers = list(scope.get("headers", []))
-        range_value = next(
-            (value for key, value in request_headers if key.lower() == b"range"), b""
-        ).decode("latin-1")
-        range_match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_value.strip(), re.IGNORECASE)
-        if is_home_assistant() and scope["method"] == "GET" and range_match:
-            first, last = range_match.groups()
-            if first or last:
-                start = int(first) if first else max(0, self._file_size - int(last))
-                end = int(last) if first and last else self._file_size - 1
-                if 0 <= start < self._file_size and end >= start:
-                    end = min(end, self._file_size - 1, start + self.ingress_range_size - 1)
-                    scope = dict(scope)
-                    scope["headers"] = [
-                        (key, value) for key, value in request_headers if key.lower() != b"range"
-                    ] + [(b"range", f"bytes={start}-{end}".encode("ascii"))]
-        # Preserve If-Range, malformed/unsatisfiable ranges, HEAD and full GET
-        # semantics. RFC 9110 §15.3.7 permits a smaller, self-described 206.
+        # Honor the browser's full Range request. Shortening open-ended ranges
+        # leaves some Native decoders waiting for bytes that never arrive; small
+        # responses also force Supervisor to buffer rather than stream them.
+        # Disconnect-aware, shielded reads bound abandoned full-range streams.
         if not self._duration_patches:
             return await super().__call__(scope, receive, send)
 

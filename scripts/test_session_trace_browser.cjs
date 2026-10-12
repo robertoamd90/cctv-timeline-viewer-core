@@ -1,0 +1,62 @@
+// Verify persistent opt-in session diagnostics on a local synthetic fixture.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const arg = name => process.argv.find(v => v.startsWith(`--${name}=`))?.slice(name.length + 3);
+const origin = arg('origin') || 'http://127.0.0.1:8766/';
+if (!['127.0.0.1','localhost','[::1]'].includes(new URL(origin).hostname)) throw Error('Local fixtures only');
+(async () => {
+  const pw = require(process.env.CTV_PLAYWRIGHT_MODULE || 'playwright');
+  const browser = await pw.webkit.launch({headless:true});
+  try {
+    const page = await browser.newPage();
+    let documents = 0;
+    await page.route('**/*', async route => {
+      if (route.request().resourceType() !== 'document') return route.continue();
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/js\/player.js\?v=[^"']+/, `js/player.js?v=fixture-page-${++documents}`);
+      return route.fulfill({response,body});
+    });
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto(origin);
+    await page.waitForFunction(() => S.timeline?.cameras.length === 4);
+    const cameras = await page.evaluate(() => S.cameras.map(c => c.name));
+    assert(cameras.every(name => /^Test [1-4]$/.test(name)), 'Synthetic cameras only');
+    await page.evaluate(() => window.ctvPlaybackTraceReady);
+    assert.equal(await page.evaluate(() => window.ctvTraceEnabled()), false, 'logging defaults off');
+    await page.evaluate(() => window.ctvSetPlaybackTraceEnabled(true));
+    await page.locator('#speed-select').selectOption('16');
+    await page.locator('#btn-play').click();
+    await page.waitForTimeout(2500);
+    await page.locator('#btn-play').click();
+    const first = await page.evaluate(() => window.ctvExportPlaybackTrace());
+    assert.equal(first.pageInfo.length, 1);
+    assert.equal(first.pageInfo[0].playerBuild, 'v=fixture-page-1');
+    assert.equal(first.pageInfo[0].runs.length, 1);
+    assert(first.pageInfo[0].runs[0].stoppedWall > first.pageInfo[0].runs[0].startedWall);
+    assert(first.pageInfo[0].runs[0].measuredDiagnostics.bufferingMs >= 0);
+    await page.reload();
+    await page.waitForFunction(() => S.timeline?.cameras.length === 4);
+    await page.evaluate(() => window.ctvPlaybackTraceReady);
+    assert.equal(await page.evaluate(() => window.ctvTraceEnabled()), true);
+    await page.locator('#speed-select').selectOption('16');
+    await page.locator('#btn-play').click();
+    await page.waitForTimeout(2500);
+    await page.locator('#btn-play').click();
+    await page.evaluate(() => window.ctvSetPlaybackTraceEnabled(false));
+    const result = await page.evaluate(() => window.ctvExportPlaybackTrace());
+    assert.equal(result.complete, true);
+    assert.equal(result.pageInfo.length, 2);
+    assert.equal(result.pageInfo[1].playerBuild, 'v=fixture-page-2');
+    assert.equal(result.pageInfo[1].runs.length, 1);
+    assert(result.samples.length >= first.samples.length);
+    assert(result.samples.some(s => s.page === 1) && result.samples.some(s => s.page === 2));
+    assert(result.events.some(e => e.type === 'page-resume' && e.playerBuild === 'v=fixture-page-2'));
+    assert.equal(result.sampleCount, result.samples.length);
+    assert.equal(result.eventCount, result.events.reduce((sum,e) => sum+e.count,0));
+    assert(!JSON.stringify(result).includes('synthetic-fixture-token'));
+    assert.deepEqual(errors, []);
+    if (arg('output')) fs.writeFileSync(arg('output'),JSON.stringify(result,null,2));
+    console.log('Opt-in default, persistent reload, per-page builds/runs and complete export passed.');
+  } finally { await browser.close(); }
+})().catch(error => {console.error(error); process.exitCode=1;});

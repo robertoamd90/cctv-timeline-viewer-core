@@ -155,15 +155,15 @@ class Mp4DurationTests(unittest.TestCase):
             self.assertEqual(start["status"], 416)
             self.assertEqual(headers["content-range"], f"bytes */{len(original)}")
 
-    def test_ingress_ranges_are_bounded_and_preserve_exact_bytes(self):
+    def test_ingress_preserves_requested_ranges_and_exact_bytes(self):
         original = bytes(range(256)) * 20000
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'large.mp4'
             path.write_bytes(original)
             for range_header, expected_start, expected_end in [
-                ('bytes=0-', 0, 2097151),
-                ('bytes=100-4000000', 100, 2097251),
-                ('bytes=-3000000', len(original)-3000000, len(original)-3000000+2097151),
+                ('bytes=0-', 0, len(original)-1),
+                ('bytes=100-4000000', 100, 4000000),
+                ('bytes=-3000000', len(original)-3000000, len(original)-1),
                 ('bytes=50-99', 50, 99),
             ]:
                 messages = []

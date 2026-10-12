@@ -139,6 +139,9 @@ function resetPlaybackRecovery() {
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
     video._nativeRecoveryReload = null;
+    video._nativeBufferPreparation = null;
+    video._nativeLoadProgress = null;
+    video.dataset.syncHeld = '0';
   });
   document.getElementById('playback-notice').hidden = true;
 }
@@ -373,6 +376,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.dataset.hasPlayed = '0';
     v.dataset.metadataReady = '0';
     v.dataset.driftSeek = '0';
+    v.dataset.syncHeld = '0';
     v.dataset.warming = '0';
     v._endProgress = null;
     clearFreezeFrame(v);
@@ -380,6 +384,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.hidden = false;
     setPlayerStatus(cell, t('player.loading'));
     pauseVideo(v);
+    v.defaultPlaybackRate = plan.playbackRate;
     v.playbackRate = plan.playbackRate;
     v.loop = false;
     v.onended = () => {
@@ -402,6 +407,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
     };
     v.onloadedmetadata = () => {
       v.dataset.metadataReady = '1';
+      if (_wasBuffering && cell.dataset.streamTransport === 'native') setNativePrimingRate(v);
+      else { v.defaultPlaybackRate = videoPlaybackRate(v); v.playbackRate = videoPlaybackRate(v); }
       seekVideo(v);
     };
     const loadedAt = performance.now();
@@ -416,7 +423,11 @@ function updatePlayerCell(cell, cam, rec, cid) {
       updateEventOverlays();
     };
     v.oncanplay = () => { clearStatusWhenReady(v); updateEventOverlays(); };
+    v.onprogress = () => {
+      v._nativeLoadProgress = {generation:v._generation, wall:performance.now()};
+    };
     v.onseeked = () => {
+      v._nativeStartProgress = null;
       v.dataset.driftSeek = '0';
       clearStatusWhenReady(v);
       updateEventOverlays();
@@ -431,6 +442,8 @@ function updatePlayerCell(cell, cam, rec, cid) {
         if (!keepVideoWarming(v)) pauseVideo(v);
         return;
       }
+      v.defaultPlaybackRate = videoPlaybackRate(v);
+      v.playbackRate = videoPlaybackRate(v);
       setPlayerStatus(cell, '');
     };
     v.onwaiting = () => {
@@ -461,7 +474,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     };
     // This is a per-browser preference because preload behavior varies by
     // engine and connection. Browsers may still treat it as a hint.
-    v.preload = S.preloadMode;
+    v.preload = !plan.transcoded && S.playing ? 'auto' : S.preloadMode;
     if (plan.transcoded) {
       const jobId = streamSessionId();
       cell.dataset.transcodeJob = jobId;
@@ -493,7 +506,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     if (!plan.transcoded) v.load();
     const generation = v._generation;
     const expectedSource = plan.transcoded ? cell.dataset.pendingUrl : v.src;
-    for (const event of ['onloadedmetadata', 'onloadeddata', 'oncanplay', 'onseeked', 'onplaying', 'onwaiting', 'onstalled', 'onerror', 'onended']) {
+    for (const event of ['onloadedmetadata', 'onloadeddata', 'oncanplay', 'onprogress', 'onseeked', 'onplaying', 'onwaiting', 'onstalled', 'onerror', 'onended']) {
       const handler = v[event];
       v[event] = (...args) => {
         if (v._generation === generation && v.src === expectedSource &&
@@ -518,6 +531,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
     v.dataset.metadataReady = '0';
     v.dataset.driftSeek = '0';
     v.dataset.warming = '0';
+    v.dataset.syncHeld = '0';
     clearFreezeFrame(v);
     pauseVideo(v);
     v.onended = v.onloadedmetadata = v.onloadeddata = v.oncanplay = v.onseeked = null;
@@ -541,7 +555,8 @@ function setPlayerStatus(cell, message, error = false) {
 }
 
 function selectedFrameReady(video) {
-  return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+  return video.dataset.metadataReady !== '0' && !video.seeking &&
+    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
 }
 
 function clearStatusWhenReady(video) {
@@ -818,6 +833,7 @@ function videoReachedEnd(video) {
 }
 
 function videoHasPlaybackBuffer(video) {
+  if (video.dataset.metadataReady === '0') return false;
   // Let the decoder consume the tail so the native `ended` event can fire.
   if (videoReachedEnd(video)) return true;
   const expectedDuration = videoBufferDuration(video);
@@ -834,7 +850,10 @@ function videoHasPlaybackBuffer(video) {
     return !video.seeking && video.readyState >= minimum;
   }
   if (warmingTarget != null) {
-    return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    const minimum = video.parentElement.dataset.streamTransport === 'native'
+      ? HTMLMediaElement.HAVE_FUTURE_DATA : HTMLMediaElement.HAVE_CURRENT_DATA;
+    return !video.seeking && video.readyState >= minimum &&
+      (video.parentElement.dataset.streamTransport !== 'native' || nativeStartupReady(video)) &&
       bufferedAheadAt(video, bufferPosition) >= requiredBuffer(video, bufferPosition);
   }
   return !video.seeking && video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA &&
@@ -887,14 +906,57 @@ function keepVideoWarming(video) {
     ['native', 'hls'].includes(video.parentElement.dataset.streamTransport);
 }
 
+function trackNativeDelivery(video) {
+  if (video.parentElement.dataset.streamTransport !== 'native') return;
+  const key = `${_playbackEpoch}:${video._generation}:${video.dataset.recording}`;
+  const end = video.buffered.length ? video.buffered.end(video.buffered.length - 1) : 0;
+  let delivery = video._nativeDelivery;
+  if (!delivery || delivery.key !== key) {
+    delivery = video._nativeDelivery = {key, end:0, advanced:null};
+  }
+  // Seek-induced shrinking/reappearing ranges are not download progress.
+  if (end > delivery.end + 0.05) {
+    delivery.end = end;
+    delivery.advanced = performance.now();
+  }
+}
+
+function nativeDeliveryActive(video) {
+  if (video.parentElement.dataset.streamTransport !== 'native' || video.error ||
+      video.networkState !== 2 || video.readyState >= 4) return false;
+  const now = performance.now();
+  const load = video._nativeLoadProgress;
+  const receiving = !!load && load.generation === video._generation && now - load.wall < 30000;
+  // Before any frame exists, real progress events can report incoming bytes
+  // before TimeRanges exposes decoded data. Source guards reject stale events.
+  if (video.readyState === HTMLMediaElement.HAVE_METADATA && !video.buffered.length) {
+    return receiving;
+  }
+  return video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    bufferedAheadAt(video, videoTargetTime(video)) > 0 &&
+    ((video._nativeDelivery?.advanced != null && now - video._nativeDelivery.advanced < 30000) ||
+     receiving);
+}
+
+function nativeStartupReady(video) {
+  if (video.readyState >= 4) return true;
+  const key = `${_playbackEpoch}:${video._generation}:${videoTargetTime(video)}`;
+  let start = video._nativeStartProgress;
+  if (!start || start.key !== key) start = video._nativeStartProgress = {key, time:video.currentTime};
+  if (Math.abs(video.currentTime - start.time) >= 0.05) start.confirmed = true;
+  return !!start.confirmed;
+}
+
 function nativeRecoveryTargetReady(video) {
+  if (video.dataset.metadataReady === '0') return false;
   if (video.seeking || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return false;
   const target = videoTargetTime(video);
   const duration = videoBufferDuration(video);
   if (Number.isFinite(duration) && target >= duration - 0.5) {
     return video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA || videoReachedEnd(video);
   }
-  return bufferedAheadAt(video, target) >= requiredBuffer(video, target);
+  return video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && nativeStartupReady(video) &&
+    bufferedAheadAt(video, target) >= requiredBuffer(video, target);
 }
 
 function recoveryVideoFailed(video) {
@@ -913,7 +975,8 @@ function reloadNativeRecovery(video, target) {
   const key = `${_playbackEpoch}:${video.dataset.recording}:${target}`;
   if (video._nativeRecoveryReload === key) return false;
   const cid = Number(cell.dataset.cam);
-  const cam = S.cameras.find(item => item.id === cid);
+  const cam = S.cameras?.find(item => item.id === cid);
+  if (!cam) return false;
   const rec = findRecordingAt(cid, S.currentTime);
   if (!cam || !rec || String(rec.id) !== video.dataset.recording) return false;
   video._nativeRecoveryReload = key;
@@ -926,19 +989,87 @@ function reloadNativeRecovery(video, target) {
   updatePlayerCell(cell, cam, rec, cid);
   video.dataset.warming = '1';
   video.preload = 'auto';
-  video.playbackRate = 1;
+  setNativePrimingRate(video);
   video._nativeRecoverySeek = null;
+  return true;
+}
+
+// Preserve the requested fragment while preloading. When the paused download
+// stops growing, request a short 1x decoding pulse and hold again after actual
+// media progress; never consume the whole startup fragment while waiting.
+const NATIVE_PRIMING_RATE = 1;
+function setNativePrimingRate(video) {
+  video.defaultPlaybackRate = NATIVE_PRIMING_RATE;
+  if (video.playbackRate !== NATIVE_PRIMING_RATE) video.playbackRate = NATIVE_PRIMING_RATE;
+}
+
+function holdReadyNativeTarget(video) {
+  const target = videoTargetTime(video);
+  const key = `${_playbackEpoch}:${video._generation}:${target}`;
+  const preparation = video._nativeBufferPreparation;
+  if (preparation?.key === key && preparation.mode === 'flow') {
+    // This source loses useful prefetch when paused. Keep the handshake alive
+    // while its now-buffered target is aligned; normal playback resumes only
+    // when every source passes the existing buffer/alignment checks.
+    setNativePrimingRate(video);
+    if (Math.abs(video.currentTime - target) > MEDIA_ALIGNMENT_TOLERANCE) seekVideo(video);
+    if (video.paused) playVideo(video);
+    return;
+  }
+  if (!video.paused) pauseVideo(video);
+  const ahead = bufferedAheadAt(video, target);
+  if (ahead < requiredBuffer(video, target) &&
+      video.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+    video._nativeBufferPreparation = {key, ahead, changed:performance.now(), mode:'flow'};
+    window.ctvTraceAction?.('native-buffer-flow', {camera:video.parentElement.dataset.cam,
+      recording:video.dataset.recording, target, bufferedAhead:ahead});
+    setNativePrimingRate(video);
+    if (video.paused) playVideo(video);
+  }
+  if (Math.abs(video.currentTime - target) > MEDIA_ALIGNMENT_TOLERANCE) seekVideo(video);
+}
+
+function holdNativeTarget(video, target) {
+  const ahead = bufferedAheadAt(video, target);
+  if (video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA || ahead <= 0.05) return false;
+  const key = `${_playbackEpoch}:${video._generation}:${target}`;
+  const now = performance.now();
+  let preparation = video._nativeBufferPreparation;
+  if (!preparation || preparation.key !== key) {
+    preparation = video._nativeBufferPreparation = {key, ahead, changed:now, mode:'hold'};
+  }
+  if (ahead > preparation.ahead + 0.01) {
+    preparation.ahead = ahead;
+    preparation.changed = now;
+    preparation.mode = 'hold';
+  }
+  if (preparation.mode === 'hold' && now - preparation.changed >= 1000) {
+    preparation.mode = 'prime';
+    preparation.primeTime = video.currentTime;
+    window.ctvTraceAction?.('native-buffer-prime', {camera:video.parentElement.dataset.cam,
+      recording:video.dataset.recording, target, bufferedAhead:ahead});
+  }
+  if (preparation.mode === 'prime' && video.currentTime - preparation.primeTime >= 0.05) {
+    preparation.mode = 'hold';
+    preparation.changed = now;
+  }
+  if (preparation.mode === 'hold') {
+    if (!video.paused) pauseVideo(video);
+  } else {
+    setNativePrimingRate(video);
+    if (video.paused) playVideo(video);
+  }
   return true;
 }
 
 function warmNativeBuffer(video) {
   if (!S.playing || !_wasBuffering ||
       video.parentElement.dataset.streamTransport !== 'native' || video.seeking) return;
+  nativeStartupReady(video);
   // Once its target is buffered, hold and align this decoder independently of
   // the other tiles. Continuing 1x warming can evict the very target we need.
   if (nativeRecoveryTargetReady(video)) {
-    if (!video.paused) pauseVideo(video);
-    seekVideo(video);
+    holdReadyNativeTarget(video);
     return;
   }
   if (video.dataset.warming !== '1') {
@@ -948,6 +1079,13 @@ function warmNativeBuffer(video) {
     showFreezeFrame(video);
   }
   const target = videoTargetTime(video);
+  if (video.readyState === HTMLMediaElement.HAVE_FUTURE_DATA &&
+      bufferedAheadAt(video, target) >= requiredBuffer(video, target) && !nativeStartupReady(video)) {
+    setNativePrimingRate(video);
+    if (video.paused) playVideo(video);
+    return;
+  }
+  if (holdNativeTarget(video, target)) return;
   const seekKey = `${video._generation}:${target}`;
   if (video._nativeRecoverySeek === seekKey &&
       bufferedAheadAt(video, target) === 0 &&
@@ -962,7 +1100,7 @@ function warmNativeBuffer(video) {
     video._nativeRecoverySeek = seekKey;
     video.currentTime = target;
   }
-  video.playbackRate = 1;
+  setNativePrimingRate(video);
   if (video.paused) playVideo(video);
 }
 
@@ -987,14 +1125,21 @@ function enterBufferingBarrier(source, message) {
   videos.forEach(video => {
     if ((alreadyBuffering && video.dataset.warming === '1') ||
         (video.parentElement.dataset.transcodeJob && !video.getAttribute('src'))) return;
+    video.dataset.syncHeld = '0';
     pauseVideo(video);
     if (!alreadyBuffering) video._nativeRecoverySeek = null;
     if (!videoHasPlaybackBuffer(video)) {
       video.dataset.warming = '1';
       showFreezeFrame(video);
+      const native = video.parentElement.dataset.streamTransport === 'native';
+      const preloadOnly = native && video.preload !== 'auto' &&
+        bufferedAheadAt(video, videoTargetTime(video)) < requiredBuffer(video, videoTargetTime(video));
       video.preload = 'auto';
-      video.playbackRate = video.parentElement.dataset.streamTransport === 'native'
-        ? 1 : videoPlaybackRate(video);
+      // A metadata-only load can retain its small initial fetch after changing
+      // preload. Reopen it through the normal loader with auto set BEFORE load.
+      if (preloadOnly && reloadNativeRecovery(video, videoTargetTime(video))) return;
+      if (native) setNativePrimingRate(video);
+      else video.playbackRate = videoPlaybackRate(video);
       // Established progressive streams continue downloading while paused.
       // HLS needs playback to refresh its playlist; a new source still needs
       // its initial play handshake. Real MP4 drift is handled by alignVideos.
@@ -1037,7 +1182,7 @@ function alignVideos(videos) {
         aligned = false;
         return;
       }
-      video.currentTime = target;
+      seekVideo(video);
       setPlayerStatus(cell, t('player.buffering'));
       aligned = false;
     }
@@ -1058,6 +1203,7 @@ function stopPlayback(immediate = false) {
   finishRecovery();
   getVideos().forEach(v => {
     v.dataset.warming = '0';
+    v.dataset.syncHeld = '0';
     clearFreezeFrame(v);
     pauseVideo(v);
     v.preload = S.preloadMode;
@@ -1187,7 +1333,7 @@ function checkVideoProgress(video) {
   const now = performance.now();
   const key = `${video._generation}:${video.dataset.recording}:${video.getAttribute('src')}`;
   const progress = video._playbackProgress;
-  if (!S.playing || _wasBuffering || video.seeking ||
+  if (!S.playing || _wasBuffering || video.dataset.syncHeld === '1' || video.seeking ||
       video.dataset.hasPlayed !== '1' || !videoHasPlaybackBuffer(video)) {
     video._playbackProgress = null;
     return;
@@ -1199,8 +1345,54 @@ function checkVideoProgress(video) {
   // A mobile decoder can freeze with readyState/buffered still reporting ready
   // and emit neither waiting nor error. Such a tile must not freeze the clock.
   if (now - progress.since >= 8000 && !videoReachedEnd(video)) {
+    if (nativeDeliveryActive(video)) {
+      enterBufferingBarrier(video, t('player.buffering'));
+      return;
+    }
     failVideo(video, 'recoveryFailed');
   }
+}
+
+function synchronizeNativeProgress(timedVideos, spreadLimit) {
+  if (timedVideos.length < 2 || timedVideos.some(({video}) =>
+      video.parentElement.dataset.streamTransport !== 'native' ||
+      video.seeking || !videoHasPlaybackBuffer(video))) return false;
+  const times = timedVideos.map(item => item.time);
+  const earliest = Math.min(...times), spread = Math.max(...times) - earliest;
+  const held = timedVideos.some(({video}) => video.dataset.syncHeld === '1');
+  if (spread <= (held ? spreadLimit / 2 : spreadLimit)) {
+    timedVideos.forEach(({video}) => {
+      if (video.dataset.syncHeld === '1') {
+        video.dataset.syncHeld = '0';
+        video.defaultPlaybackRate = videoPlaybackRate(video);
+      video.playbackRate = videoPlaybackRate(video);
+        revealFreezeOnNextFrame(video);
+        playVideo(video);
+      }
+    });
+    return false;
+  }
+  // With data available, drift is a scheduling problem, not a buffer failure.
+  // Pausing every decoder aborts the lagging decoder's startup over and over.
+  // Hold only the leaders; lagging decoders keep their pending Play and reads.
+  timedVideos.forEach(({video,time}) => {
+    if (time > earliest + spreadLimit / 2) {
+      if (video.dataset.syncHeld !== '1') {
+        video.dataset.syncHeld = '1';
+        showFreezeFrame(video);
+        pauseVideo(video);
+        window.ctvTraceAction?.('native-sync-hold', {camera:video.parentElement.dataset.cam,
+          recording:video.dataset.recording, mediaTime:video.currentTime});
+      }
+    } else if (video.dataset.syncHeld === '1' && time <= earliest + spreadLimit / 4) {
+      video.dataset.syncHeld = '0';
+      video.defaultPlaybackRate = videoPlaybackRate(video);
+      video.playbackRate = videoPlaybackRate(video);
+      revealFreezeOnNextFrame(video);
+      playVideo(video);
+    }
+  });
+  return true;
 }
 
 function clockTick() {
@@ -1210,13 +1402,20 @@ function clockTick() {
     playbackClockTrace.phase = 'stopped';
     _tickId = null; return;
   }
-  activeVideos().forEach(checkVideoProgress);
+  activeVideos().forEach(video => { trackNativeDelivery(video); checkVideoProgress(video); });
   if (_recoveryStarted != null && performance.now() - _recoveryStarted > 30000) {
-    activeVideos().filter(recoveryVideoFailed).forEach(video => failVideo(video, 'recoveryFailed'));
-    finishRecovery();
-    // Surviving tiles may still need the seek back to their buffered target.
-    // Give that alignment its own recovery, rather than leaving no deadline.
-    if (activeVideos().length) enterBufferingBarrier(null, null);
+    const waiting = activeVideos().filter(recoveryVideoFailed);
+    const failed = waiting.filter(video => !nativeDeliveryActive(video));
+    failed.forEach(video => failVideo(video, 'recoveryFailed'));
+    // A partial Native download below its encoded bitrate may not start until
+    // more data arrives. Real delivery with a valid target is not a broken file;
+    // keep the original barrier age and require byte-range progress to continue.
+    if (failed.length || !waiting.some(nativeDeliveryActive)) {
+      finishRecovery();
+      // Surviving tiles may still need the seek back to their buffered target.
+      // Give that alignment its own recovery, rather than leaving no deadline.
+      if (activeVideos().length) enterBufferingBarrier(null, null);
+    }
   }
   const videos = activeVideos();
   const completed = videos.find(videoReachedEnd);
@@ -1258,6 +1457,7 @@ function clockTick() {
     videos.forEach(video => {
       video.dataset.warming = '0';
       setPlayerStatus(video.parentElement, '');
+      video.defaultPlaybackRate = videoPlaybackRate(video);
       video.playbackRate = videoPlaybackRate(video);
       revealFreezeOnNextFrame(video);
       playVideo(video, true);
@@ -1272,10 +1472,12 @@ function clockTick() {
     .filter(item => Number.isFinite(item.time));
   if (timedVideos.length) {
     const videoTimes = timedVideos.map(item => item.time);
-    const synchronizedTime = CtvMedia.medianTime(videoTimes);
+    let synchronizedTime = CtvMedia.medianTime(videoTimes);
     const maxSpread = playbackSpreadLimit(videos);
     const spread = Math.max(...videoTimes) - Math.min(...videoTimes);
-    if (spread > maxSpread) {
+    if (synchronizeNativeProgress(timedVideos, maxSpread)) {
+      synchronizedTime = Math.max(S.currentTime, Math.min(...videoTimes));
+    } else if (spread > maxSpread) {
       playbackClockTrace.phase = 'drift';
       const outlier = timedVideos.reduce((worst, item) => {
         const deviation = Math.abs(item.time - synchronizedTime);

@@ -20,6 +20,7 @@ class SlowReadCancellationTests(unittest.TestCase):
             files = []
             returned = []
             released = []
+            receive_calls = []
             class SlowFile:
                 def __init__(self):
                     self.started = request_event.get()
@@ -48,6 +49,7 @@ class SlowReadCancellationTests(unittest.TestCase):
                 started = threading.Event()
                 request_event.set(started)
                 async def receive():
+                    receive_calls.append(started)
                     while not started.is_set():
                         await asyncio.sleep(0.001)
                     return {'type':'http.disconnect'}
@@ -71,6 +73,8 @@ class SlowReadCancellationTests(unittest.TestCase):
             self.assertTrue(all(file.closed and file.assert_safe for file in files))
             self.assertEqual(limiter.borrowed_tokens, 0)
             self.assertEqual(len(released), 100)
+            self.assertEqual(len(receive_calls), 100,
+                             "one disconnect observer must own each ASGI receive")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'video.mp4'
             path.write_bytes(b'x' * (5 * 1024 * 1024))

@@ -8,6 +8,8 @@
   video-frame callbacks; retain existing fragments immediately on recovery.
   Do not repeat a pulse until buffered data grows. Reapply the Native playback
   rate after an asynchronous Play handshake to avoid stale effective rates.
+- Keep one owner of ASGI disconnect events when upstream FileResponse also
+  monitors receive, retaining shielded reads and bounded worker capacity.
 - Include sanitized media-error messages and Native reload reasons in the
   opt-in session trace.
 

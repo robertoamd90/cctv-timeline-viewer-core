@@ -76,6 +76,13 @@ class VideoFileResponse(FileResponse):
                 if (await receive())["type"] == "http.disconnect":
                     return
 
+        # FileResponse may also watch disconnects on older ASGI versions.
+        # This wrapper owns receive: two consumers can race for the same event.
+        # Its CancelScope propagates disconnect cancellation to the file sender,
+        # including an upstream internal watcher, while reads retain shielding.
+        async def stream_receive():
+            await asyncio.Future()
+
         sending_scope = None
         cancel_requested = False
 
@@ -89,7 +96,7 @@ class VideoFileResponse(FileResponse):
                     sending_scope = cancel_scope
                     if cancel_requested:
                         cancel_scope.cancel()
-                    await self._send_file(scope, receive, send)
+                    await self._send_file(scope, stream_receive, send)
 
         sending = asyncio.create_task(stream())
         disconnect = asyncio.create_task(watch_disconnect())

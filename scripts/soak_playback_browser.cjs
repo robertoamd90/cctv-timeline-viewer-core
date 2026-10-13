@@ -114,12 +114,39 @@ if (require.main === module) (async () => {
           // Mobile browser chrome/orientation can resize a visible page.
           // Keep existing sources and exercise the actual resize handler.
           await page.setViewportSize({width:390,height:760});
+        } else if (['native-decode-once','native-decode-persistent'].includes(disruption)) {
+          // Inject an error event on a valid file while retaining the real
+          // decoder/source loader. This tests recovery, not iPhone causality.
+          await page.evaluate(persistent => {
+            const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
+              Number.isFinite(v.duration) && v.duration-v.currentTime>10);
+            if(!v) throw Error('Decode injection needs a valid Native source');
+            const recording=v.dataset.recording,originalUpdate=updatePlayerCell;
+            window.__nativeDecodeFault={recording,cam:v.parentElement.dataset.cam,
+              injectedWall:performance.now(),reloads:[],persistent};
+            const inject=()=>{
+              Object.defineProperty(v,'error',{configurable:true,get:()=>({code:3,message:'Synthetic decoder failure'})});
+              v.dispatchEvent(new Event('error'));
+              delete v.error;
+            };
+            updatePlayerCell=(cell,cam,rec,cid)=>{
+              if(cell===v.parentElement && String(rec?.id)===recording){
+                __nativeDecodeFault.reloads.push({wall:performance.now(),time:S.currentTime,deadline:_recoveryStarted});
+                delete v.error;updatePlayerCell=originalUpdate;
+                if(persistent)v.addEventListener('loadeddata',()=>setTimeout(inject,0),{once:true});
+              }
+              return originalUpdate(cell,cam,rec,cid);
+            };
+            __nativeDecodeFault.target=S.currentTime;
+            inject();
+          }, disruption === 'native-decode-persistent');
+          result.simulatedNativeDecodeError=true;
         } else if (disruption === 'native-initial-fragment') {
           // Controlled source-buffer policy with real decoders: an initial two
           // second fragment is lost if consumed before the later data arrives.
           // Reload repeats that policy; seeking alone cannot restore an evicted
           // fragment. This models the trace sequence, not an iPhone browser.
-          await page.evaluate(() => {
+          await page.evaluate(tolerance => {
             const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
               Number.isFinite(v.duration) && v.duration-v.currentTime>10);
             if (!v) throw Error('Initial fragment injection needs remaining media');
@@ -136,7 +163,7 @@ if (require.main === module) (async () => {
               if(this.dataset.recording!==recording){restore();return ranges;}
               if(generation!==this._generation){generation=this._generation;began=performance.now();evicted=false;}
               if(performance.now()-began<3000){
-                if(this.currentTime>target+1)evicted=true;
+                if(this.currentTime>target+tolerance)evicted=true;
                 return {length:1,start:()=>target,end:()=>target+1.991};
               }
               if(evicted)return {length:1,start:()=>target+1,end:()=>this.duration};
@@ -157,7 +184,7 @@ if (require.main === module) (async () => {
             };
             enterBufferingBarrier(v,'controlled-initial-fragment');
             __nativeFragmentFault.deadlineBefore=_recoveryStarted;
-          });
+          }, Number(arg('fragment-tolerance') || 1));
           result.simulatedNativeInitialFragment=true;
         } else if (disruption === 'native-target-gap') {
           await page.evaluate(() => {
@@ -346,6 +373,7 @@ if (require.main === module) (async () => {
     result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
     result.nativeTailFault = await page.evaluate(()=>window.__nativeTailFault || null);
     result.nativeFragmentFault = await page.evaluate(()=>window.__nativeFragmentFault || null);
+    result.nativeDecodeFault = await page.evaluate(()=>window.__nativeDecodeFault || null);
     result.nativeTargetFault = await page.evaluate(()=>window.__nativeTargetFault || null);
     if (disruption === 'play-denied') {
       result.deniedPlayback = await page.evaluate(()=>({playing:S.playing,time:S.currentTime,

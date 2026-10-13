@@ -216,6 +216,18 @@ for (const transport of ['native', 'mp4', 'hls']) {
 }
 
 async function asyncTests() {
+  // A pending Play can start at an old effective rate even if the getter already
+  // reports 1. Reapply priming once it resolves; stale handshakes cannot touch it.
+  {
+    const v=video({buffered:20,transport:'native'});let writes=[];
+    Object.defineProperty(v,'playbackRate',{get:()=>1,set:value=>writes.push(value)});
+    const ctx=setup([v]);vm.runInContext('_wasBuffering=true;',ctx);
+    await ctx.playVideo(v);assert.deepEqual(writes,[1]);
+    let resolve;v.play=()=>new Promise(done=>{resolve=done;});
+    const old=ctx.playVideo(v);v._generation=2;resolve();await old;
+    assert.deepEqual(writes,[1]);
+  }
+
   // pause() aborts a pending play asynchronously. Its rejection must not
   // re-enter the barrier after a newer resume of the very same source.
   const resumed = video({buffered:5,transport:'native'});
@@ -781,4 +793,47 @@ for (const state of ['partial','gap','smallGap','growingDuration','growingBuffer
  vm.runInContext('_wasBuffering=false;_recoveryStarted=null;',ctx);
  ctx.checkVideoProgress(v);now=18002;ctx.checkVideoProgress(v);
  assert.equal(reloads,2);assert.equal(v.hidden,true);
+}
+
+// A transient Native decode error gets one fresh source per recording/epoch,
+// including simultaneous errors on different cameras. Never renew a deadline.
+{
+  const v=video({buffered:20,transport:'native'});v.parentElement.dataset.cam='1';
+  const ctx=setup([v]);ctx.S.cameras=[{id:1}];ctx.findRecordingAt=()=>({id:1});
+  let loads=0;ctx.updatePlayerCell=()=>{loads++;v._generation=(v._generation||0)+1;};
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=300;',ctx);
+  assert.equal(ctx.retryNativeDecodeError(v,{code:3}),true);
+  assert.equal(loads,1);assert.equal(ctx.S.currentTime,110);
+  assert.equal(vm.runInContext('_recoveryStarted',ctx),300);
+  assert.equal(ctx.retryNativeDecodeError(v,{code:3}),false);
+  ctx.failVideo(v);assert.equal(v.hidden,true);assert.equal(ctx.S.playing,true);
+}
+for(const [transport,code,playing,expired] of [
+  ['native',2,true,false],['native',4,true,false],['mp4',3,true,false],
+  ['hls',3,true,false],['native',3,false,false],['native',3,true,true]]) {
+  const v=video({buffered:20,transport});v.parentElement.dataset.cam='1';
+  const ctx=setup([v]);ctx.S.playing=playing;ctx.S.cameras=[{id:1}];
+  ctx.findRecordingAt=()=>({id:1});ctx.updatePlayerCell=()=>assert.fail('unexpected retry');
+  if(expired)vm.runInContext('_recoveryStarted=-30000;',ctx);
+  assert.equal(ctx.retryNativeDecodeError(v,{code}),false);
+}
+
+// Decoded-frame delivery stops a warming pulse before a coarse player tick can
+// consume the fragment. Late callbacks from a replaced source cannot pause it.
+{
+  const v=video({time:0,transport:'native'});v.parentElement.dataset.playbackRate='16';
+  v.buffered={length:1,start:()=>0,end:()=>2};let frame,now=1000;
+  v.requestVideoFrameCallback=fn=>{frame=fn;return 1;};
+  v.pause=function(){this.paused=true;this.pauses++;};
+  v.play=function(){this.paused=false;this.plays++;return Promise.resolve();};
+  const ctx=setup([v]);ctx.S.currentTime=100;ctx.S.speed=16;ctx.performance.now=()=>now;
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  ctx.warmNativeBuffer(v);now=2001;ctx.warmNativeBuffer(v);
+  assert.equal(v.paused,false);v.currentTime=.033;frame();
+  assert.equal(v.paused,true);assert.equal(v._nativeBufferPreparation.mode,'hold');
+  assert.equal(ctx.S.currentTime,100);assert.equal(vm.runInContext('_recoveryStarted',ctx),500);
+  now=3002;ctx.warmNativeBuffer(v);assert.equal(v.paused,true,'no repeated pulse without new buffer growth');
+  v.buffered={length:1,start:()=>0,end:()=>3};ctx.warmNativeBuffer(v);
+  now=4003;ctx.warmNativeBuffer(v);const late=frame;v._generation=2;
+  late();assert.equal(v.paused,false,'ignore callback from the old source');
 }

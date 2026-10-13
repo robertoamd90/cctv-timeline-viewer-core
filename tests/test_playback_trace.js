@@ -21,7 +21,10 @@ const video = {
   buffered:{length:1,start:()=>2,end:()=>6},
   getVideoPlaybackQuality:()=>({totalVideoFrames:60,droppedVideoFrames:2}),
 };
+video.error = {code:3,message:'Decode failed https://host/api/hassio_ingress/SECRET/video/123'};
 const state = videoState(video);
+assert.equal(state.error,3);
+assert.equal(state.errorMessage,'Decode failed [path]');
 assert.equal(state.duration, null);
 assert.equal(state.frames, 60);
 assert.equal(state.seeking, true);

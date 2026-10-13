@@ -24,6 +24,7 @@
       warming: video.dataset.warming, played: video.dataset.hasPlayed,
       buffering: cell?.dataset.buffering, failed: cell?.dataset.failed,
       error: video.error?.code || null,
+      errorMessage: video.error?.message ? errorText(video.error.message) : null,
       frames: quality?.totalVideoFrames ?? video.webkitDecodedFrameCount ?? null,
       dropped: quality?.droppedVideoFrames ?? video.webkitDroppedFrameCount ?? null,
       buffered: Array.from({length: Math.min(video.buffered.length, 8)}, (_, i) =>

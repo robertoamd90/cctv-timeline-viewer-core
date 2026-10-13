@@ -15,6 +15,7 @@ window.ctvPlaybackDiagnostics = () => ({...playbackDiagnostics,
   bufferingMs: playbackDiagnostics.bufferingMs + (_recoveryStarted == null ? 0 : performance.now() - _recoveryStarted)});
 const _nativeMediaCacheToken = Date.now().toString(36);
 const _failedRecordings = new Map();
+const _nativeDecodeRetries = new Set();
 const MEDIA_ALIGNMENT_TOLERANCE = 0.1;
 const playbackClockTrace = {tick: null, phase: 'idle'};
 window.ctvPlaybackState = () => ({
@@ -89,7 +90,16 @@ function pauseVideo(video) {
 function playVideo(video, recoverOnFailure = false) {
   const generation = video._generation, epoch = _playbackEpoch;
   const attempt = video._playAttempt = (video._playAttempt || 0) + 1;
-  return video.play().catch(error => {
+  return video.play().then(() => {
+    if (!S.playing || generation !== video._generation || epoch !== _playbackEpoch ||
+        attempt !== video._playAttempt || video.parentElement.dataset.streamTransport !== 'native') return;
+    // WebKit can retain the previous effective rate when a pending Play starts,
+    // even while its getter already reports the priming rate. Reapply the rate
+    // once the handshake resolves; never rewrite it on every clock tick.
+    const rate = _wasBuffering ? NATIVE_PRIMING_RATE : videoPlaybackRate(video);
+    video.defaultPlaybackRate = rate;
+    video.playbackRate = rate;
+  }, error => {
     window.ctvTracePlayRejected?.(video, error);
     if (!S.playing || generation !== video._generation || epoch !== _playbackEpoch ||
         attempt !== video._playAttempt) return;
@@ -108,6 +118,10 @@ function playVideo(video, recoverOnFailure = false) {
 function cancelHlsSource(video) {
   if (!video) return;
   clearTimeout(video._pauseTimer);
+  if (video._nativePrimeFrame != null) {
+    video.cancelVideoFrameCallback?.(video._nativePrimeFrame);
+    video._nativePrimeFrame = null;
+  }
   video._generation = (video._generation || 0) + 1;
   const jobId = video.parentElement?.dataset.transcodeJob || video.parentElement?.dataset.hlsJob;
   pauseVideo(video);
@@ -134,10 +148,15 @@ async function releasePlaybackSession(jobId) {
 
 function resetPlaybackRecovery() {
   _playbackEpoch++;
+  _nativeDecodeRetries.clear();
   _wasBuffering = false;
   finishRecovery();
   getVideos().forEach(video => {
     video.dataset.recoveryAttempts = '0';
+    if (video._nativePrimeFrame != null) {
+      video.cancelVideoFrameCallback?.(video._nativePrimeFrame);
+      video._nativePrimeFrame = null;
+    }
     video._nativeRecoveryReload = null;
     video._nativeBufferPreparation = null;
     video._nativeLoadProgress = null;
@@ -470,7 +489,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
       const mediaError = v.error;
       console.error('CTV media failure', {recording: recId, transport: cell.dataset.streamTransport,
         code: mediaError?.code, message: mediaError?.message, source: v.currentSrc || v.src});
-      failVideo(v);
+      if (!retryNativeDecodeError(v, mediaError)) failVideo(v);
     };
     // This is a per-browser preference because preload behavior varies by
     // engine and connection. Browsers may still treat it as a hint.
@@ -970,7 +989,33 @@ function recoveryVideoFailed(video) {
   return Math.abs(video.currentTime - videoTargetTime(video)) > MEDIA_ALIGNMENT_TOLERANCE;
 }
 
-function reloadNativeRecovery(video, target) {
+function retryNativeDecodeError(video, error) {
+  const cell = video.parentElement;
+  const recording = video.dataset.recording;
+  // A decode error can be transient on a previously playable Native file.
+  // One fresh decoder per recording/epoch; unsupported/network errors and
+  // repeated decode failures still isolate the tile through the normal path.
+  if (!S.playing || cell.dataset.streamTransport !== 'native' || error?.code !== 3 ||
+      !recording || _nativeDecodeRetries.has(recording) ||
+      (_recoveryStarted != null && performance.now() - _recoveryStarted >= 30000)) return false;
+  const cid = Number(cell.dataset.cam);
+  const cam = S.cameras?.find(item => item.id === cid);
+  const rec = findRecordingAt(cid, S.currentTime);
+  if (!cam || !rec || String(rec.id) !== recording) return false;
+  _nativeDecodeRetries.add(recording);
+  window.ctvTraceAction?.('native-decode-retry', {camera:String(cid), recording,
+    target:videoTargetTime(video), video:window.ctvTraceEnabled?.()
+      ? window.CtvPlaybackTrace?.videoState(video) : undefined});
+  // Starting the barrier first preserves its original deadline when it already
+  // exists. The ordinary loader reinstalls source-generation guards.
+  enterBufferingBarrier(null, t('player.buffering'));
+  updatePlayerCell(cell, cam, rec, cid);
+  video.dataset.warming = '1';
+  setNativePrimingRate(video);
+  return true;
+}
+
+function reloadNativeRecovery(video, target, reason = 'target-gap') {
   const cell = video.parentElement;
   const key = `${_playbackEpoch}:${video.dataset.recording}:${target}`;
   if (video._nativeRecoveryReload === key) return false;
@@ -981,7 +1026,7 @@ function reloadNativeRecovery(video, target) {
   if (!cam || !rec || String(rec.id) !== video.dataset.recording) return false;
   video._nativeRecoveryReload = key;
   window.ctvTraceAction?.('native-recovery-reload', {
-    camera:String(cid), recording:String(rec.id), target, mediaTime:video.currentTime,
+    camera:String(cid), recording:String(rec.id), reason, target, mediaTime:video.currentTime,
     bufferedStart:video.buffered.length ? video.buffered.start(0) : null,
   });
   // Reinstall source-generation guards through the normal loader. The global
@@ -1043,13 +1088,34 @@ function holdNativeTarget(video, target) {
     preparation.changed = now;
     preparation.mode = 'hold';
   }
-  if (preparation.mode === 'hold' && now - preparation.changed >= 1000) {
+  if (preparation.mode === 'hold' && now - preparation.changed >= 1000 &&
+      (preparation.primedAhead == null || ahead > preparation.primedAhead + 0.01)) {
     preparation.mode = 'prime';
     preparation.primeTime = video.currentTime;
+    preparation.primedAhead = ahead;
+    // Stop on the first actual decoded advance. A timer tick can arrive after
+    // several frames and consume/evict a short fragment before it pauses.
+    if (video.requestVideoFrameCallback && video._nativePrimeFrame == null) {
+      const generation = video._generation, epoch = _playbackEpoch;
+      const onFrame = () => {
+        video._nativePrimeFrame = null;
+        if (!S.playing || !_wasBuffering || generation !== video._generation ||
+            epoch !== _playbackEpoch || video._nativeBufferPreparation !== preparation ||
+            preparation.mode !== 'prime') return;
+        if (!video.seeking && video.currentTime - preparation.primeTime > 0.001) {
+          preparation.mode = 'hold';
+          preparation.changed = performance.now();
+          if (!video.paused) pauseVideo(video);
+        } else {
+          video._nativePrimeFrame = video.requestVideoFrameCallback(onFrame);
+        }
+      };
+      video._nativePrimeFrame = video.requestVideoFrameCallback(onFrame);
+    }
     window.ctvTraceAction?.('native-buffer-prime', {camera:video.parentElement.dataset.cam,
       recording:video.dataset.recording, target, bufferedAhead:ahead});
   }
-  if (preparation.mode === 'prime' && video.currentTime - preparation.primeTime >= 0.05) {
+  if (preparation.mode === 'prime' && video.currentTime - preparation.primeTime > 0.001) {
     preparation.mode = 'hold';
     preparation.changed = now;
   }
@@ -1137,8 +1203,11 @@ function enterBufferingBarrier(source, message) {
       video.preload = 'auto';
       // A metadata-only load can retain its small initial fetch after changing
       // preload. Reopen it through the normal loader with auto set BEFORE load.
-      if (preloadOnly && reloadNativeRecovery(video, videoTargetTime(video))) return;
-      if (native) setNativePrimingRate(video);
+      if (preloadOnly && reloadNativeRecovery(video, videoTargetTime(video), 'cold-preload')) return;
+      if (native) {
+        setNativePrimingRate(video);
+        if (holdNativeTarget(video, videoTargetTime(video))) return;
+      }
       else video.playbackRate = videoPlaybackRate(video);
       // Established progressive streams continue downloading while paused.
       // HLS needs playback to refresh its playlist; a new source still needs
@@ -1350,7 +1419,7 @@ function checkVideoProgress(video) {
       return;
     }
     if (video.parentElement.dataset.streamTransport === 'native' &&
-        reloadNativeRecovery(video, videoTargetTime(video))) {
+        reloadNativeRecovery(video, videoTargetTime(video), 'decoder-frozen')) {
       enterBufferingBarrier(video, t('player.buffering'));
       return;
     }

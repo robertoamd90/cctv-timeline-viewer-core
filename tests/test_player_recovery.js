@@ -837,3 +837,48 @@ for(const [transport,code,playing,expired] of [
   now=4003;ctx.warmNativeBuffer(v);const late=frame;v._generation=2;
   late();assert.equal(v.paused,false,'ignore callback from the old source');
 }
+
+// Post-seek prefetch with a present target and a completed pulse can stall.
+// Reopen once across replacement generations without moving the clock/deadline.
+{
+  const v=video({time:10.015,transport:'native'});v._generation=7;v.paused=true;
+  v.parentElement.dataset.cam='1';v.parentElement.dataset.playbackRate='16';
+  v.buffered={length:1,start:()=>10,end:()=>11.933};
+  v._nativePrefetchSeek={key:'0:7:10',wall:1000};
+  v._nativeBufferPreparation={key:'0:7:10',ahead:1.933,changed:1500,mode:'hold',primedAhead:1.933};
+  v._nativeLoadProgress={generation:7,wall:1300};
+  const ctx=setup([v]);ctx.S.speed=16;ctx.S.cameras=[{id:1}];ctx.findRecordingAt=()=>({id:1});
+  let now=6499,loads=0;ctx.performance.now=()=>now;
+  ctx.updatePlayerCell=()=>{loads++;v._generation++;};
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  assert.equal(ctx.recoverStalledNativePrefetch(v,10),false);
+  now=6500;ctx.warmNativeBuffer(v);assert.equal(loads,1);
+  assert.equal(ctx.S.currentTime,110);assert.equal(vm.runInContext('_recoveryStarted',ctx),500);
+  v._nativePrefetchSeek={key:'0:8:10',wall:6500};
+  v._nativeBufferPreparation={key:'0:8:10',ahead:1.933,changed:6500,mode:'hold',primedAhead:1.933};
+  now=12000;assert.equal(ctx.recoverStalledNativePrefetch(v,10),false);
+  assert.equal(loads,1,'a permanently stalled replacement cannot loop');
+}
+for(const guard of ['progress','bufferGrowth','noSeek','oldSeek','noPulse','seeking','playing',
+                    'enoughData','missingTarget','expired','mp4','hls','newEpoch']) {
+  const v=video({time:10.015,transport:'native'});v._generation=7;v.paused=true;
+  v.parentElement.dataset.playbackRate='16';v.buffered={length:1,start:()=>10,end:()=>11.933};
+  v._nativePrefetchSeek={key:'0:7:10',wall:1000};
+  v._nativeBufferPreparation={key:'0:7:10',ahead:1.933,changed:1500,mode:'hold',primedAhead:1.933};
+  const ctx=setup([v]);ctx.S.speed=16;ctx.performance.now=()=>10000;
+  ctx.reloadNativeRecovery=()=>assert.fail(`unexpected reload: ${guard}`);
+  vm.runInContext('_wasBuffering=true;_recoveryStarted=500;',ctx);
+  if(guard==='progress')v._nativeLoadProgress={generation:7,wall:9500};
+  if(guard==='bufferGrowth')v.buffered={length:1,start:()=>10,end:()=>12.1};
+  if(guard==='noSeek')v._nativePrefetchSeek=null;
+  if(guard==='oldSeek')v._nativePrefetchSeek.key='0:6:10';
+  if(guard==='noPulse')delete v._nativeBufferPreparation.primedAhead;
+  if(guard==='seeking')v.seeking=true;
+  if(guard==='playing')v.paused=false;
+  if(guard==='enoughData')v.buffered={length:1,start:()=>10,end:()=>20};
+  if(guard==='missingTarget')v.buffered={length:1,start:()=>11,end:()=>20};
+  if(guard==='expired')vm.runInContext('_recoveryStarted=-21000;',ctx);
+  if(['mp4','hls'].includes(guard))v.parentElement.dataset.streamTransport=guard;
+  if(guard==='newEpoch')vm.runInContext('_playbackEpoch++;',ctx);
+  assert.equal(ctx.recoverStalledNativePrefetch(v,10),false,guard);
+}

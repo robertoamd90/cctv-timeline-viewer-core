@@ -447,6 +447,10 @@ function updatePlayerCell(cell, cam, rec, cid) {
     };
     v.onseeked = () => {
       v._nativeStartProgress = null;
+      if (cell.dataset.streamTransport === 'native') {
+        v._nativePrefetchSeek = {key:`${_playbackEpoch}:${v._generation}:${videoTargetTime(v)}`,
+          wall:performance.now()};
+      }
       v.dataset.driftSeek = '0';
       clearStatusWhenReady(v);
       updateEventOverlays();
@@ -1128,6 +1132,28 @@ function holdNativeTarget(video, target) {
   return true;
 }
 
+function recoverStalledNativePrefetch(video, target) {
+  const preparation = video._nativeBufferPreparation;
+  const seek = video._nativePrefetchSeek;
+  const key = `${_playbackEpoch}:${video._generation}:${target}`;
+  if (!S.playing || !_wasBuffering || video.seeking || video.error || !video.paused ||
+      video.parentElement.dataset.streamTransport !== 'native' ||
+      video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA || seek?.key !== key ||
+      preparation?.key !== key || preparation.mode !== 'hold' ||
+      preparation.primedAhead == null || _recoveryStarted == null) return false;
+  const ahead = bufferedAheadAt(video, target);
+  const now = performance.now();
+  // A completed seek can leave only a small fragment despite a previously full
+  // range. One decoding pulse is enough; do not keep consuming that fragment.
+  // Reopen only if neither buffer growth nor source progress follows the pulse.
+  if (ahead <= 0.05 || ahead >= requiredBuffer(video, target) ||
+      ahead > preparation.ahead + 0.01 || now - _recoveryStarted >= 30000) return false;
+  const load = video._nativeLoadProgress;
+  const lastProgress = load?.generation === video._generation ? load.wall : 0;
+  if (now - Math.max(seek.wall, preparation.changed, lastProgress) < 5000) return false;
+  return reloadNativeRecovery(video, target, 'post-seek-prefetch-stalled');
+}
+
 function warmNativeBuffer(video) {
   if (!S.playing || !_wasBuffering ||
       video.parentElement.dataset.streamTransport !== 'native' || video.seeking) return;
@@ -1151,6 +1177,7 @@ function warmNativeBuffer(video) {
     if (video.paused) playVideo(video);
     return;
   }
+  if (recoverStalledNativePrefetch(video, target)) return;
   if (holdNativeTarget(video, target)) return;
   const seekKey = `${video._generation}:${target}`;
   if (video._nativeRecoverySeek === seekKey &&

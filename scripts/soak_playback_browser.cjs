@@ -141,6 +141,45 @@ if (require.main === module) (async () => {
             inject();
           }, disruption === 'native-decode-persistent');
           result.simulatedNativeDecodeError=true;
+        } else if (disruption.startsWith('native-post-seek-prefetch')) {
+          // Real decoder and seek, with a controlled partial-buffer policy.
+          // Models the observed controller state, not a natural phone stall.
+          await page.evaluate(kind => {
+            const v=activeVideos().find(v=>v.parentElement.dataset.streamTransport==='native' &&
+              Number.isFinite(v.duration) && v.duration-v.currentTime>15 && !v.seeking);
+            if(!v)throw Error('Post-seek injection needs remaining Native media');
+            const target=v.currentTime+1,recording=v.dataset.recording;
+            const originalUpdate=updatePlayerCell,originalFail=failVideo;
+            const persistent=kind.endsWith('-persistent'),progressing=kind.endsWith('-progress');
+            S.currentTime=Number(v.parentElement.dataset.start)+target;
+            const fault=window.__nativePrefetchFault={recording,cam:v.parentElement.dataset.cam,
+              target,timelineTarget:S.currentTime,injectedWall:performance.now(),reloads:[],persistent,progressing};
+            let timer;
+            const restore=()=>{delete v.buffered;clearInterval(timer);updatePlayerCell=originalUpdate;failVideo=originalFail;};
+            Object.defineProperty(v,'buffered',{configurable:true,get(){
+              if(this.dataset.recording!==recording){restore();return this.buffered;}
+              return {length:1,start:()=>target,end:()=>target+1.933};
+            }});
+            updatePlayerCell=(cell,cam,rec,cid)=>{
+              if(cell===v.parentElement && String(rec?.id)===recording){
+                fault.reloads.push({wall:performance.now(),time:S.currentTime,deadline:_recoveryStarted});
+                if(!persistent)restore();
+              }
+              return originalUpdate(cell,cam,rec,cid);
+            };
+            failVideo=(video,reason)=>{
+              if(video===v){fault.failedWall=performance.now();fault.failureReason=reason;restore();}
+              return originalFail(video,reason);
+            };
+            if(progressing)timer=setInterval(()=>{
+              if(v.dataset.recording===recording)v.dispatchEvent(new Event('progress'));
+            },500);
+            if(progressing)setTimeout(()=>{fault.availableWall=performance.now();restore();},12000);
+            enterBufferingBarrier(v,'controlled-post-seek-prefetch');
+            fault.deadlineBefore=_recoveryStarted;
+            v.currentTime=target;
+          },disruption);
+          result.simulatedNativePostSeekPrefetch=true;
         } else if (disruption === 'native-initial-fragment') {
           // Controlled source-buffer policy with real decoders: an initial two
           // second fragment is lost if consumed before the later data arrives.
@@ -373,6 +412,7 @@ if (require.main === module) (async () => {
     result.playPauseRace = await page.evaluate(()=>window.__playRace || null);
     result.nativeTailFault = await page.evaluate(()=>window.__nativeTailFault || null);
     result.nativeFragmentFault = await page.evaluate(()=>window.__nativeFragmentFault || null);
+    result.nativePrefetchFault = await page.evaluate(()=>window.__nativePrefetchFault || null);
     result.nativeDecodeFault = await page.evaluate(()=>window.__nativeDecodeFault || null);
     result.nativeTargetFault = await page.evaluate(()=>window.__nativeTargetFault || null);
     if (disruption === 'play-denied') {

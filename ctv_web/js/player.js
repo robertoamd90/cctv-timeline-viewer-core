@@ -84,6 +84,8 @@ function pauseVideo(video) {
   // pause() rejects a pending play in a later microtask. Invalidate that
   // attempt before pausing, even when the source and playback epoch survive.
   video._playAttempt = (video._playAttempt || 0) + 1;
+  window.CtvPlayerAudio?.markPause(video);
+  video.muted = true;
   video.pause();
 }
 
@@ -104,6 +106,10 @@ function playVideo(video, recoverOnFailure = false) {
     if (!S.playing || generation !== video._generation || epoch !== _playbackEpoch ||
         attempt !== video._playAttempt) return;
     if (error.name === 'NotAllowedError') {
+      if (window.CtvPlayerAudio?.blocked(video)) {
+        playVideo(video, recoverOnFailure);
+        return;
+      }
       // This is a browser policy denial, not insufficient media data. A fresh
       // user gesture is required; entering ready-buffer recovery would loop.
       stopPlayback();
@@ -279,7 +285,16 @@ function seekVideo(video) {
   if (needsMetadataSeek ||
       (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
        Math.abs(video.currentTime - target) > 0.05)) {
+    video.muted = true;
     video.currentTime = target;
+    if (S.playing && _wasBuffering && video.parentElement.dataset.streamTransport === 'hls') {
+      // Native HLS can leave a buffered seek pending while paused. Let its
+      // decoder finish behind the freeze frame; audio stays muted until all
+      // cameras have completed alignment.
+      video.dataset.warming = '1';
+      showFreezeFrame(video);
+      playVideo(video);
+    }
   }
   return true;
 }
@@ -340,6 +355,7 @@ function renderPlayers(forceReload = false) {
   });
   applyHotspotCellPositions();
   updateEventOverlays();
+  window.CtvPlayerAudio?.sync();
 }
 
 function updatePlayerCell(cell, cam, rec, cid) {
@@ -347,6 +363,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
   let v = cell.querySelector('video');
   if (!v) {
     cell.innerHTML = `<div class="label-overlay"></div>
+      <button type="button" class="player-audio" aria-pressed="false"></button>
       <div class="hotspot-action">${esc(t('player.bringToFront'))}</div>
       <div class="player-status" hidden></div>
       <div class="empty-state" hidden></div>
@@ -355,6 +372,7 @@ function updatePlayerCell(cell, cam, rec, cid) {
         controlslist="nofullscreen nodownload noremoteplayback" preload="metadata" hidden></video>`;
     v = cell.querySelector('video');
     v.playsInline = true;
+    window.CtvPlayerAudio?.attach(v);
   }
   cancelHlsSource(v);
   cell.dataset.hlsJob = '';
@@ -688,6 +706,7 @@ function updateAutoHotspot(previousTime, currentTime) {
 // ── Seek ──
 function seekPlayersToTime() {
   window.ctvTraceAction?.('seek', {time:S.currentTime});
+  getVideos().forEach(video => { video.muted = true; });
   resetPlaybackRecovery();
   if (hasCompressedPlayback()) {
     renderPlayers(true);
@@ -1212,6 +1231,7 @@ function enterBufferingBarrier(source, message) {
     window.ctvTraceAction?.('buffering-start', {time:S.currentTime});
   }
   _wasBuffering = true;
+  getVideos().forEach(video => { video.muted = true; });
   const videos = activeVideos();
   // S.currentTime is authoritative. A newly loaded video's currentTime is often
   // still zero here and must never be allowed to rewind the global clock.
@@ -1357,6 +1377,7 @@ function applyPlaybackSpeed(value) {
   S.speed = speed;
   _clockStartTime = S.currentTime;
   _clockStartWall = performance.now();
+  window.CtvPlayerAudio?.reset();
   if (!hasCompressedPlayback()) {
     getVideos().forEach(video => {
       video.parentElement.dataset.playbackRate = String(S.speed);
@@ -1385,10 +1406,11 @@ document.getElementById('preload-select').onchange = function() {
 };
 
 window.addEventListener('pagehide', () => {
+  window.CtvPlayerAudio?.reset();
   stopPlayback(true);
 });
 
-document.addEventListener('visibilitychange', () => { if (document.hidden) stopPlayback(true); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) { window.CtvPlayerAudio?.reset(); stopPlayback(true); } });
 document.getElementById('playback-retry').onclick = () => document.getElementById('btn-play').click();
 
 window.addEventListener('pageshow', event => {
@@ -1615,6 +1637,7 @@ function clockTick() {
 
   playbackClockTrace.phase = 'transition';
   reconcilePlaybackPosition();
+  window.CtvPlayerAudio?.sync();
   playbackClockTrace.phase = S.playing ? 'scheduled' : 'stopped';
   _tickId = requestAnimationFrame(clockTick);
 }
@@ -1707,3 +1730,9 @@ function updateEventOverlays() {
     overlay.hidden = !active.length;
   });
 }
+
+window.CtvPlayerAudio?.configure({
+  state: () => ({speed:S.speed, playing:S.playing, buffering:_wasBuffering, hidden:document.hidden, day:S.timeline?.from}),
+  videos: getVideos, label: t, resume: video => playVideo(video, true),
+  blocked: () => toast(t('player.audioBlocked'), 'error'),
+});

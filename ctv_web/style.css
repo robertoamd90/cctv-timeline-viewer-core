@@ -652,3 +652,15 @@ label[for=cam-event-position] { display:block; margin-top:16px; }
 #stream-options-menu .trace-toggle { display: flex; align-items: center; gap: 8px; }
 #stream-options-menu .trace-toggle input { width: auto; flex-shrink: 0; }
 #stream-options-menu button { margin-top: 8px; }
+
+.player-audio {
+  position: absolute; top: 4px; right: 4px; z-index: 5;
+  width: 40px; height: 40px; padding: 9px; border: 0; border-radius: 5px;
+  background: rgba(0,0,0,0.8); color: #fff; cursor: pointer;
+  touch-action: manipulation;
+}
+.player-audio svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.player-audio[aria-pressed="true"] { color: var(--accent); }
+.player-audio:disabled { opacity: 0.45; cursor: default; }
+.player-audio:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.player-cell .label-overlay { max-width: calc(100% - 60px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

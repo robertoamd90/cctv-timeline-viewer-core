@@ -11,6 +11,7 @@ import sys
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path, help="New directory for synthetic media and two independent databases")
+    parser.add_argument("--audio", action="store_true", help="Include a synthetic AAC tone")
     parser.add_argument("--duration", type=int, default=45, help="Real duration of each generated file")
     parser.add_argument("--segments", type=int, default=1, help="Consecutive recordings per camera")
     parser.add_argument("--corrupt-segment", type=int, default=-1, help="Zero-based segment to corrupt on camera 1 only")
@@ -29,7 +30,9 @@ def main():
     for duration in sorted(set(durations)):
         source = root / f"synthetic-{duration}s.mp4"
         subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
-                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=15", "-t", str(duration),
+                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=15",
+                    *(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                       "-c:a", "aac", "-b:a", "64k"] if args.audio else []), "-t", str(duration),
                     "-c:v", "libx264", "-preset", "ultrafast", "-b:v", "2000k", "-g", "15",
                     "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(source)], check=True)
         sources[duration] = source

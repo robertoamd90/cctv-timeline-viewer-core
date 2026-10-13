@@ -882,3 +882,16 @@ for(const guard of ['progress','bufferGrowth','noSeek','oldSeek','noPulse','seek
   if(guard==='newEpoch')vm.runInContext('_playbackEpoch++;',ctx);
   assert.equal(ctx.recoverStalledNativePrefetch(v,10),false,guard);
 }
+
+// HLS alignment seeks must keep decoding while the global clock is held.
+{
+  const hls = video({transport:'hls', buffered:5});
+  const ctx = setup([hls]);
+  ctx.S.currentTime = 112;
+  vm.runInContext('_wasBuffering = true', ctx);
+  ctx.seekVideo(hls);
+  assert.equal(hls.currentTime, 12);
+  assert.equal(hls.muted, true);
+  assert.equal(hls.dataset.warming, '1');
+  assert.equal(hls.plays, 1);
+}

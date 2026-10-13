@@ -250,6 +250,19 @@ matter. Camera settings and original videos survive an index rebuild. No second
 video archive is created. Beta and stable have separate data: promoting the
 software does not migrate cameras or event history between their installations.
 
+## Camera audio
+
+Each camera has a speaker button. Audio starts muted; at 1×, press a speaker
+once to listen to that camera and again to mute it. Selecting another speaker
+mutes the previous camera. Changing speed clears the selection, so returning
+to 1× does not automatically enable audio.
+
+The selection follows consecutive recordings from the same camera. Audio stays
+silent during pauses, seeks, buffering and recording gaps; it never switches
+to another camera automatically. Native uses the recording's existing audio;
+Balanced and Fast include optional AAC audio at 1×. A recording without an audio
+track remains silent. Phone volume is controlled by the device.
+
 ## Streaming Quality
 
 The **Stream** menu stores two preferences in the current browser:
@@ -379,6 +392,7 @@ pip install -r requirements-dev.txt
 python3 -m unittest discover -s tests -v
 node tests/test_media.js
 node tests/test_player_recovery.js
+node tests/test_player_audio.js
 node tests/test_hotspot.js
 node tests/test_event_picker.js
 node tests/test_event_playback.js

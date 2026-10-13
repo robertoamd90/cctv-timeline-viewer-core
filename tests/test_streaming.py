@@ -83,6 +83,37 @@ class TranscodeCommandTests(unittest.TestCase):
         "bitrate_kbps": 500,
     }
 
+    def test_normal_speed_streams_retain_optional_audio(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for audio in (False, True):
+                source = str(Path(directory) / f"source-{audio}.mp4")
+                subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi",
+                    "-i", "testsrc2=size=160x120:rate=10",
+                    *(["-f", "lavfi", "-i", "sine=sample_rate=48000"] if audio else []),
+                    "-t", "2", "-c:v", "libx264", "-c:a", "aac", source], check=True)
+                for transport in ("mp4", "hls"):
+                    output = str(Path(directory) / f"output-{audio}-{transport}")
+                    Path(output).mkdir()
+                    if transport == "mp4":
+                        target = str(Path(output) / "output.mp4")
+                        command = build_transcode_command(source, self.profile, .5, 1)
+                        command[-1] = target
+                    else:
+                        target = str(Path(output) / "index.m3u8")
+                        command = build_hls_command(source, self.profile, .5, 1, output)
+                    subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error",
+                        "-show_streams", "-of", "json", target]))
+                    streams = probe["streams"]
+                    self.assertEqual(sum(s["codec_type"] == "audio" for s in streams), int(audio))
+                    if audio:
+                        track = next(s for s in streams if s["codec_type"] == "audio")
+                        video = next(s for s in streams if s["codec_type"] == "video")
+                        self.assertEqual(track["codec_name"], "aac")
+                        self.assertLess(abs(float(track["start_time"]) - float(video["start_time"])), .1)
+            for speed in (.5, 2, 16):
+                self.assertIn("-an", build_transcode_command(source, self.profile, 0, speed))
+
     def test_hls_initial_buffer_scales_with_playback_speed(self):
         self.assertEqual(initial_hls_segment_count(1), 1)
         self.assertEqual(initial_hls_segment_count(4), 2)

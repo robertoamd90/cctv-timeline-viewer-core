@@ -2,6 +2,10 @@
 
 const CTV_TRANSLATIONS = {
   en: {
+    "player.audioOn": "Enable this camera’s audio",
+    "player.audioOff": "Mute this camera",
+    "player.audioAt1x": "Audio is available only at 1×",
+    "player.audioBlocked": "Audio was blocked by the browser. Tap the speaker again to enable it.",
     "autoscan.title": "Automatic indexing — all cameras",
     "autoscan.save": "Save automatic indexing",
     "autoscan.saved": "Automatic indexing saved",
@@ -242,6 +246,10 @@ const CTV_TRANSLATIONS = {
     "player.noneForDay": "No recording available for the selected day"
   },
   it: {
+    "player.audioOn": "Attiva l’audio di questa camera",
+    "player.audioOff": "Disattiva l’audio di questa camera",
+    "player.audioAt1x": "Audio disponibile solo a 1×",
+    "player.audioBlocked": "Il browser ha bloccato l’audio. Premi di nuovo l’altoparlante per attivarlo.",
     "autoscan.title": "Indicizzazione automatica — tutte le camere",
     "autoscan.save": "Salva indicizzazione automatica",
     "autoscan.saved": "Indicizzazione automatica salvata",

@@ -50,6 +50,10 @@ function renderTimeline() {
     return;
   }
 
+  // Day changes clear the range before the asynchronous load replaces the
+  // timeline. Partition updates or a queued pan may still render the old data.
+  // Keep the existing drawing until the new timeline and range are both ready.
+  if (!S.zoomRange) return;
   const [vFrom, vTo] = S.zoomRange;
   const segW = contentWidth();   // per ruler e timeToX
   S.rWidth = segW;
